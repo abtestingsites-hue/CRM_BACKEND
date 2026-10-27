@@ -14,6 +14,14 @@ export interface NormalizedCallEvent {
   sipResponseCode?: string;
   timestamp: Date;
   rawPayload: any;
+  // Phase 25: Source Attribution & Campaign Tracking
+  originalCallerId?: string;
+  source?: string;
+  sourceType?: 'VERIFIED' | 'INFERRED' | 'UNKNOWN';
+  campaign?: string;
+  trackingNumber?: string;
+  referralSource?: string;
+  sourceMetadata?: any;
 }
 
 export interface OutboundCallRequest {

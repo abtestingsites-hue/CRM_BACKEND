@@ -74,6 +74,41 @@ export class VobizProvider implements TelephonyProvider {
 
     const duration = parseInt(payload?.DialCallDuration || payload?.Duration || '0', 10);
     const recordingUrl = payload?.RecordingUrl || null;
+
+    // Phase 25: Source Attribution & Campaign Metadata Classification
+    const originalCallerId = payload?.From || payload?.CallFrom || payload?.CallerID || 'Unknown';
+    const calledNumber = payload?.To || payload?.CallTo || payload?.DID || 'Unknown';
+
+    // Check for verified campaign/referral metadata
+    const explicitCampaign = payload?.campaign || payload?.Campaign || payload?.utm_campaign || payload?.campaign_id || null;
+    const explicitSource = payload?.source || payload?.Source || payload?.utm_source || null;
+    const explicitReferral = payload?.referral || payload?.Referral || payload?.referralSource || payload?.ReferralSource || payload?.utm_medium || null;
+    const explicitTracking = payload?.trackingNumber || payload?.tracking_number || payload?.tracking_did || payload?.TrackingNumber || null;
+
+    let sourceType: 'VERIFIED' | 'INFERRED' | 'UNKNOWN' = 'UNKNOWN';
+    let source: string | null = null;
+    let campaign: string | null = null;
+    let referralSource: string | null = null;
+    let trackingNumber: string | null = explicitTracking;
+
+    if (explicitCampaign || explicitSource || explicitReferral) {
+      sourceType = 'VERIFIED';
+      source = explicitSource || (explicitCampaign ? 'Marketing Campaign' : 'Provider Webhook');
+      campaign = explicitCampaign;
+      referralSource = explicitReferral;
+    } else if (calledNumber && (calledNumber.includes('8064267760') || (vobizTrunkNumber && toClean.endsWith(vobizTrunkNumber.slice(-10))))) {
+      sourceType = 'INFERRED';
+      source = 'Primary Inbound Trunk (+918064267760)';
+      campaign = 'Direct Carrier Trunk';
+      trackingNumber = calledNumber;
+    } else {
+      sourceType = 'UNKNOWN';
+      source = null;
+      campaign = null;
+      trackingNumber = calledNumber !== 'Unknown' ? calledNumber : null;
+    }
+
+    const sanitizedMetadata = sanitizeRecursive(payload);
     
     return {
       provider: 'vobiz',
@@ -81,7 +116,7 @@ export class VobizProvider implements TelephonyProvider {
       eventType,
       direction,
       fromNumber: payload?.From || payload?.CallFrom || 'Unknown',
-      toNumber: payload?.To || payload?.CallTo || 'Unknown',
+      toNumber: calledNumber,
       roomName: payload?.roomName || null,
       duration,
       recordingUrl,
@@ -90,6 +125,13 @@ export class VobizProvider implements TelephonyProvider {
       sipResponseCode: payload?.SipResponseCode,
       timestamp: new Date(),
       rawPayload: payload,
+      originalCallerId,
+      source: source || undefined,
+      sourceType,
+      campaign: campaign || undefined,
+      trackingNumber: trackingNumber || undefined,
+      referralSource: referralSource || undefined,
+      sourceMetadata: sanitizedMetadata,
     };
   }
 

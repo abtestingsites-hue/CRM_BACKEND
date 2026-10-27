@@ -1,4 +1,4 @@
-import { Controller, All, Post, Req, Res, Body, Logger, Header, Get, Inject, HttpException, Param, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { Controller, All, Post, Patch, Req, Res, Body, Logger, Header, Get, Inject, HttpException, Param, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { LivekitService } from './livekit.service';
 import { TelephonyService } from './telephony.service';
@@ -140,6 +140,38 @@ export class TelephonyController {
     return await this.telephonyService.executeCrossUnitLeadTransfer(leadId, body, (req as any).user);
   }
 
+  @Get('caller-lookup/:identifier')
+  async identifyCallerCrossUnit(
+    @Param('identifier') identifier: string,
+    @Req() req: Request,
+  ) {
+    const user = (req as any).user;
+    if (!identifier || identifier.trim() === '') {
+      throw new BadRequestException('Caller phone number or identifier is required');
+    }
+    return await this.telephonyService.identifyCallerCrossUnit(identifier.trim(), user);
+  }
+
+  @Patch('calls/:callSid/draft-notes')
+  async saveCallDraftNotes(
+    @Param('callSid') callSid: string,
+    @Body() body: any,
+    @Req() req: Request,
+  ) {
+    const user = (req as any).user;
+    return await this.telephonyService.saveCallDraftNotes(callSid, body, user);
+  }
+
+  @Post('calls/:callSid/complete-documentation')
+  async completeCallDocumentation(
+    @Param('callSid') callSid: string,
+    @Body() body: any,
+    @Req() req: Request,
+  ) {
+    const user = (req as any).user;
+    return await this.telephonyService.completeCallDocumentation(callSid, body, user);
+  }
+
   @Get('my-ringing-call')
   async getMyRingingCall(@Req() req: Request) {
     const user = (req as any).user;
@@ -160,16 +192,33 @@ export class TelephonyController {
       agent.name || 'Agent',
     );
 
+    const callerNumber = callSession.callerNumber || callSession.customer?.phone || 'Unknown';
+    let crossUnitLookup = null;
+    if (callerNumber && callerNumber !== 'Unknown') {
+      try {
+        crossUnitLookup = await this.telephonyService.identifyCallerCrossUnit(callerNumber, user);
+      } catch (err: any) {
+        this.logger.warn(`Failed cross-unit lookup in getMyRingingCall: ${err.message}`);
+      }
+    }
+
     return {
       call: {
-        caller: callSession.customer?.phone || 'Unknown',
-        phone: callSession.customer?.phone || 'Unknown',
+        caller: callerNumber,
+        phone: callerNumber,
         callSid: callSession.reason,
         roomName: callSession.livekitRoom,
         timestamp: callSession.createdAt.getTime(),
-        source: 'vobiz',
+        source: callSession.source || 'vobiz',
+        sourceType: callSession.sourceType || 'UNKNOWN',
+        campaign: callSession.campaign,
+        trackingNumber: callSession.trackingNumber,
+        referralSource: callSession.referralSource,
+        sourceMetadata: callSession.sourceMetadata,
+        callerMatchStatus: callSession.callerMatchStatus,
         customerContext: { customer: callSession.customer },
         assignedAgent: { id: agent.id, name: agent.name },
+        crossUnitLookup,
         token,
       },
     };

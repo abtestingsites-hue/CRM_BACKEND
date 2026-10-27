@@ -582,6 +582,22 @@ export class EnquiryService {
     return digits;
   }
 
+  async resolveUnitForFoundationAndCategory(foundation?: string, category?: string, isAmbulance?: boolean) {
+    let targetUnitCode = 'UEC';
+    if (isAmbulance || (category && String(category).toLowerCase().includes('ambulance'))) {
+      targetUnitCode = 'AMBULANCE';
+    } else if (foundation) {
+      const fUpper = foundation.toUpperCase();
+      if (fUpper.includes('AMBULANCE')) targetUnitCode = 'AMBULANCE';
+      else if (fUpper.includes('UNCF')) targetUnitCode = 'UNCF';
+      else if (fUpper.includes('HOME_CARE') || fUpper.includes('IN_HOME') || fUpper.includes('A_CARE')) targetUnitCode = 'HOME_CARE';
+      else targetUnitCode = 'UEC';
+    }
+    return await this.prisma.businessUnit.findFirst({
+      where: { code: targetUnitCode },
+    });
+  }
+
   async saveCallIntake(callSidOrId: string, dto: SaveCallIntakeDto, user: any) {
     // Locate call session by ID or reason (Vobiz provider callSid)
     const session = await this.prisma.callSession.findFirst({
@@ -602,9 +618,13 @@ export class EnquiryService {
       dto.primaryService?.toLowerCase().includes('ambulance') ||
       dto.subServices?.some(s => s.toLowerCase().includes('ambulance'));
 
+    const resolvedUnit = await this.resolveUnitForFoundationAndCategory(dto.foundation, dto.enquiryCategory as string, isAmbulance);
+
     const intakePayload = {
       ...dto,
       isAmbulance,
+      unitId: resolvedUnit?.id,
+      unitCode: resolvedUnit?.code,
       savedAt: new Date().toISOString(),
       savedBy: user?.name || user?.email || 'Agent',
       authorId: user?.id || user?.userId,
@@ -615,6 +635,9 @@ export class EnquiryService {
       where: { id: session.id },
       data: {
         intakeForm: intakePayload,
+        unitId: resolvedUnit?.id,
+        disposition: dto.callOutcome || undefined,
+        enquiryCategory: (dto.enquiryCategory as any) || undefined,
         ...(dto.liveNotes ? { liveNotes: { text: dto.liveNotes, updatedAt: new Date().toISOString() } } : {}),
       },
     });
@@ -622,6 +645,11 @@ export class EnquiryService {
     // Update or link lead
     let targetLeadId = dto.leadId || session.leadId;
     const cleanPhone = this.normalizePhone(dto.phone || session.customer?.phone);
+    let existingLead: any = null;
+
+    if (targetLeadId) {
+      existingLead = await this.prisma.lead.findUnique({ where: { id: targetLeadId } });
+    }
 
     if (!targetLeadId && cleanPhone) {
       // Find existing lead by phone to prevent duplicates
@@ -631,6 +659,7 @@ export class EnquiryService {
       });
       if (existing) {
         targetLeadId = existing.id;
+        existingLead = existing;
       } else {
         // Create brand new Lead
         const createdLead = await this.prisma.lead.create({
@@ -639,10 +668,11 @@ export class EnquiryService {
             phoneNumber: cleanPhone,
             email: dto.email || session.customer?.email || null,
             serviceInterest: dto.primaryService || dto.serviceCategory || 'Elder Care',
-            source: (session as any).direction === 'OUTBOUND' || (session.reason && session.reason.includes('outbound')) ? 'Outbound Call' : 'Inbound Call',
+            source: (session as any).direction === 'OUTBOUND' || (session.reason && session.reason.includes('outbound')) ? 'Outbound Call' : (session.source || 'Inbound Call'),
             status: 'NEW',
             priority: isAmbulance ? LeadPriority.EMERGENCY : LeadPriority.NORMAL,
             foundation: dto.foundation || 'UEC',
+            unitId: resolvedUnit?.id,
             enquiryCategory: dto.enquiryCategory as any,
             primaryService: dto.primaryService || null,
             subServices: dto.subServices || [],
@@ -665,11 +695,33 @@ export class EnquiryService {
           },
         });
         targetLeadId = createdLead.id;
+        existingLead = createdLead;
       }
       // Link session to the lead
       await this.prisma.callSession.update({
         where: { id: session.id },
         data: { leadId: targetLeadId },
+      });
+    }
+
+    // Check if unit reclassification occurred and audit it
+    if (existingLead && resolvedUnit && existingLead.unitId && existingLead.unitId !== resolvedUnit.id && targetLeadId) {
+      await this.prisma.leadTransferAudit.create({
+        data: {
+          leadId: targetLeadId,
+          sourceUnitId: existingLead.unitId,
+          destUnitId: resolvedUnit.id,
+          transferredById: user?.id || user?.userId || undefined,
+          assignedAgentId: user?.agentId || undefined,
+          reason: `Reclassified during call intake: ${dto.enquiryCategory || dto.primaryService || 'Intent change'}`,
+          status: 'COMPLETED',
+          preserveHistory: true,
+          metadata: {
+            previousFoundation: existingLead.foundation,
+            newFoundation: dto.foundation,
+            callSid: session.reason || session.id,
+          },
+        },
       });
     }
 
@@ -767,8 +819,29 @@ export class EnquiryService {
       ? LeadPriority.HIGH
       : LeadPriority.NORMAL;
 
+    const resolvedUnit = await this.resolveUnitForFoundationAndCategory(dto.foundation, dto.enquiryCategory as string, isAmbulance);
+
     let savedLead;
     if (targetLead) {
+      if (resolvedUnit && targetLead.unitId && targetLead.unitId !== resolvedUnit.id) {
+        await this.prisma.leadTransferAudit.create({
+          data: {
+            leadId: targetLead.id,
+            sourceUnitId: targetLead.unitId,
+            destUnitId: resolvedUnit.id,
+            transferredById: user?.id || user?.userId || undefined,
+            assignedAgentId: user?.agentId || undefined,
+            reason: `Reclassified in structured enquiry: ${dto.enquiryCategory || dto.primaryService || 'Intent change'}`,
+            status: 'COMPLETED',
+            preserveHistory: true,
+            metadata: {
+              previousFoundation: targetLead.foundation,
+              newFoundation: dto.foundation,
+            },
+          },
+        });
+      }
+
       // Update existing lead transactionally
       savedLead = await this.prisma.lead.update({
         where: { id: targetLead.id },
@@ -778,6 +851,7 @@ export class EnquiryService {
           email: dto.email !== undefined ? dto.email : targetLead.email,
           serviceInterest: dto.primaryService || dto.serviceCategory || targetLead.serviceInterest,
           foundation: dto.foundation || targetLead.foundation || 'UEC',
+          unitId: resolvedUnit?.id || targetLead.unitId,
           enquiryCategory: (dto.enquiryCategory as any) || targetLead.enquiryCategory,
           primaryService: dto.primaryService || targetLead.primaryService,
           subServices: dto.subServices && dto.subServices.length > 0 ? dto.subServices : targetLead.subServices,
@@ -812,6 +886,7 @@ export class EnquiryService {
           status: (dto.status as any) || 'NEW',
           priority: leadPriority,
           foundation: dto.foundation || 'UEC',
+          unitId: resolvedUnit?.id,
           enquiryCategory: (dto.enquiryCategory as any) || EnquiryCategory.SERVICE_ENQUIRY,
           primaryService: dto.primaryService || null,
           subServices: dto.subServices || [],

@@ -693,10 +693,40 @@ model CallSession {
   transferAudits CallTransferAudit[]
   activities     LeadActivity[]
 
+  // Phase 25: Inbound Call Source Attribution & Cross-Unit Intelligence
+  providerCallId       String?
+  callerNumber         String?
+  originalCallerId     String?
+  calledNumber         String?
+  direction            String?       @default("INBOUND")
+  provider             String?       @default("vobiz")
+  source               String?
+  sourceType           String?       @default("UNKNOWN") // VERIFIED, INFERRED, UNKNOWN
+  campaign             String?
+  trackingNumber       String?
+  referralSource       String?
+  sourceMetadata       Json?
+  callerMatchStatus    String?       // MATCH_FOUND, NO_HISTORY, MULTIPLE_MATCHES, LOOKUP_FAILED
+  unitId               String?       @db.Uuid
+  unit                 BusinessUnit? @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  departmentId         String?       @db.Uuid
+  department           Department?   @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  queueId              String?       @db.Uuid
+  queue                Queue?        @relation(fields: [queueId], references: [id], onDelete: SetNull)
+  draftNotes           Json?
+  disposition          String?
+  enquiryCategory      EnquiryCategory?
+
   @@index([status])
   @@index([startedAt])
   @@index([callerUserId])
   @@index([customerId])
+  @@index([providerCallId])
+  @@index([callerNumber])
+  @@index([calledNumber])
+  @@index([unitId])
+  @@index([departmentId])
+  @@index([queueId])
 }
 
 model CallParticipant {
@@ -771,6 +801,7 @@ model Department {
   
   queues      Queue[]
   agents      Agent[]
+  callSessions CallSession[]
   
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -795,6 +826,7 @@ model Queue {
   assignmentStrategy      String    @default("LONGEST_IDLE")
   
   assignments  QueueAssignment[]
+  callSessions CallSession[]
   
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -1047,6 +1079,7 @@ model BusinessUnit {
   sopTemplates    SopTemplate[]
   sopExecutions   SopExecution[]
   sopDocuments    SopDocument[]
+  callSessions    CallSession[]
 
   @@index([status])
   @@index([code])

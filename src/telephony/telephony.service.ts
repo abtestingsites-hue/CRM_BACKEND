@@ -1,4 +1,5 @@
 import { Injectable, Logger, Inject, forwardRef, NotFoundException, ForbiddenException, BadRequestException, Optional } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
@@ -33,22 +34,288 @@ export class TelephonyService {
   ) { }
 
   // ==========================================
-  // CRM CONTEXT & VOICEBOT
+  // PHONE NUMBER NORMALIZATION (E.164 & NATIONAL)
   // ==========================================
-  async lookupCustomerContext(phoneNumber: string) {
-    this.logger.log(`Looking up customer context for phone: ${phoneNumber}`);
+  normalizePhone(raw?: string | null): { e164: string; national: string; variants: string[] } {
+    if (!raw) return { e164: '', national: '', variants: [] };
+    let clean = String(raw).trim();
+    try { clean = decodeURIComponent(clean); } catch (_) {}
+    const lower = clean.toLowerCase();
+    if (['unknown', 'anonymous', 'withheld', 'internal', 'private', 'none'].includes(lower)) {
+      return { e164: '', national: '', variants: [] };
+    }
+    const digits = clean.replace(/[^\d]/g, '');
+    if (!digits) return { e164: '', national: '', variants: [] };
+
+    let national = digits;
+    let e164 = '';
+    if (digits.length === 10) {
+      national = digits;
+      e164 = `+91${digits}`;
+    } else if (digits.length === 11 && digits.startsWith('0')) {
+      national = digits.slice(1);
+      e164 = `+91${national}`;
+    } else if (digits.length === 12 && digits.startsWith('91')) {
+      national = digits.slice(2);
+      e164 = `+${digits}`;
+    } else if (digits.length > 7) {
+      national = digits.slice(-10);
+      e164 = clean.startsWith('+') ? clean : `+${digits}`;
+    } else {
+      national = digits;
+      e164 = digits;
+    }
+
+    const variants = Array.from(new Set([
+      e164,
+      national,
+      `91${national}`,
+      `0${national}`,
+      `+91${national}`,
+      clean
+    ].filter(v => Boolean(v) && v.length >= 7)));
+
+    return { e164, national, variants };
+  }
+
+  // ==========================================
+  // PHASE 25: CROSS-UNIT CALLER IDENTIFICATION
+  // ==========================================
+  async identifyCallerCrossUnit(phoneNumber: string, user?: any) {
     try {
-      // Search in Customer table
-      const customer = await this.prisma.customer.findUnique({
-        where: { phone: phoneNumber },
-        include: { servicePlans: true, tickets: true }, // Included tickets
+      const { e164, national, variants } = this.normalizePhone(phoneNumber);
+      if (!national || national.length < 7) {
+        return {
+          matchStatus: 'NO_HISTORY' as const,
+          message: 'No previous history found — new contact.',
+          matchingCustomer: null,
+          matchingLead: null,
+          matches: [],
+          relevantCalls: [],
+          lastContactDate: null,
+          authorizedNotes: null,
+          normalizedPhone: phoneNumber,
+        };
+      }
+
+      // Check user permissions for unit-level isolation
+      const isSuperAdmin = user?.role === 'SUPER_ADMIN' || user?.role === 'ADMIN';
+      let authorizedUnitIds: string[] = [];
+      if (!isSuperAdmin && user?.id) {
+        const memberships = await this.prisma.unitMembership.findMany({
+          where: { userId: user.id },
+          select: { unitId: true },
+        });
+        authorizedUnitIds = memberships.map((m) => m.unitId);
+        if (user.agentId) {
+          const agentRec = await this.prisma.agent.findUnique({
+            where: { id: user.agentId },
+            select: { department: true }
+          });
+          if (agentRec?.department) {
+            const matchingUnits = await this.prisma.businessUnit.findMany({
+              where: { name: { contains: agentRec.department, mode: 'insensitive' } },
+              select: { id: true }
+            });
+            authorizedUnitIds.push(...matchingUnits.map(u => u.id));
+          }
+        }
+      }
+
+      // Query Customers with normalized variants
+      const customers = await this.prisma.customer.findMany({
+        where: {
+          OR: [
+            { phone: { in: variants } },
+            ...(national.length >= 7 ? [{ phone: { contains: national } }] : [])
+          ]
+        },
+        include: {
+          notes: { orderBy: { createdAt: 'desc' }, take: 3 },
+          servicePlans: true,
+          tickets: { orderBy: { createdAt: 'desc' }, take: 3 },
+        },
+        take: 10,
       });
 
-      // Search in Lead table
-      const lead = await this.prisma.lead.findUnique({
-        where: { phoneNumber },
-        include: { assignedAgent: true },
+      // Query Leads across ALL units (UEC, UNCF, Ambulance, etc.)
+      const leads = await this.prisma.lead.findMany({
+        where: {
+          isMerged: false,
+          OR: [
+            { phoneNumber: { in: variants } },
+            ...(national.length >= 7 ? [{ phoneNumber: { contains: national } }] : [])
+          ]
+        },
+        include: {
+          unit: true,
+          assignedAgent: { select: { id: true, name: true, department: true } },
+          followups: { orderBy: { followupDate: 'desc' }, take: 2 },
+        },
+        take: 10,
       });
+
+      // Query recent calls
+      const customerIds = customers.map(c => c.id);
+      const leadIds = leads.map(l => l.id);
+      const callSessions = await this.prisma.callSession.findMany({
+        where: {
+          OR: [
+            { callerNumber: { in: variants } },
+            ...(national.length >= 7 ? [{ callerNumber: { contains: national } }] : []),
+            ...(customerIds.length > 0 ? [{ customerId: { in: customerIds } }] : []),
+            ...(leadIds.length > 0 ? [{ leadId: { in: leadIds } }] : []),
+          ]
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: {
+          unit: { select: { id: true, code: true, name: true } },
+          department: { select: { id: true, name: true } }
+        }
+      });
+
+      // Build structured matches list
+      const matches: Array<{
+        id: string;
+        recordType: 'CUSTOMER' | 'LEAD';
+        name: string;
+        phone: string;
+        unit: { id?: string; code: string; name: string } | null;
+        department: string | null;
+        status: string;
+        lastContactDate: Date | string | null;
+        openEnquiry: string | null;
+        notes: string | null;
+        priority?: string;
+        isAuthorized: boolean;
+      }> = [];
+
+      for (const lead of leads) {
+        const leadUnitId = lead.unitId;
+        const isAuthorized = isSuperAdmin || !leadUnitId || authorizedUnitIds.length === 0 || authorizedUnitIds.includes(leadUnitId);
+        
+        const unitObj = lead.unit 
+          ? { id: lead.unit.id, code: lead.unit.code, name: lead.unit.name }
+          : { code: lead.foundation || 'UEC', name: lead.foundation || 'Universal ElderCare' };
+
+        const notesContent = isAuthorized 
+          ? (lead.notes || null)
+          : '[Access Restricted - Unit Permission Required]';
+
+        matches.push({
+          id: lead.id,
+          recordType: 'LEAD',
+          name: lead.customerName,
+          phone: lead.phoneNumber,
+          unit: unitObj,
+          department: lead.assignedAgent?.department || lead.unit?.name || 'Care Coordination',
+          status: lead.status,
+          lastContactDate: lead.updatedAt || lead.createdAt,
+          openEnquiry: lead.primaryService || lead.serviceInterest || (lead.enquiryCategory ? String(lead.enquiryCategory) : null),
+          notes: notesContent,
+          priority: lead.priority,
+          isAuthorized,
+        });
+      }
+
+      for (const cust of customers) {
+        const hasMatchingLead = leads.some(l => l.phoneNumber.slice(-10) === cust.phone.slice(-10));
+        if (!hasMatchingLead || leads.length === 0) {
+          const notesContent = cust.notes?.[0]?.content || null;
+          matches.push({
+            id: cust.id,
+            recordType: 'CUSTOMER',
+            name: cust.name,
+            phone: cust.phone,
+            unit: { code: 'MASTER', name: 'Master Customer Directory' },
+            department: 'Master Registry',
+            status: cust.servicePlans?.length ? 'ACTIVE_PLAN' : 'REGISTERED',
+            lastContactDate: cust.updatedAt || cust.createdAt,
+            openEnquiry: cust.servicePlans?.[0]?.planType || null,
+            notes: notesContent,
+            priority: 'NORMAL',
+            isAuthorized: true,
+          });
+        }
+      }
+
+      // Compute last contact date
+      let lastContactDate: Date | null = null;
+      if (callSessions.length > 0 && callSessions[0].createdAt) {
+        lastContactDate = callSessions[0].createdAt;
+      } else if (leads.length > 0 && leads[0].updatedAt) {
+        lastContactDate = leads[0].updatedAt;
+      } else if (customers.length > 0 && customers[0].updatedAt) {
+        lastContactDate = customers[0].updatedAt;
+      }
+
+      let matchStatus: 'MATCH_FOUND' | 'NO_HISTORY' | 'MULTIPLE_MATCHES' | 'LOOKUP_FAILED' = 'NO_HISTORY';
+      let message = 'No previous history found — new contact.';
+
+      const distinctUnitCodes = new Set(matches.map(m => m.unit?.code).filter(Boolean));
+
+      if (matches.length === 0) {
+        matchStatus = 'NO_HISTORY';
+        message = 'No previous history found — new contact.';
+      } else if (distinctUnitCodes.size > 1 || matches.length > 1) {
+        matchStatus = 'MULTIPLE_MATCHES';
+        message = `Multiple records found across ${distinctUnitCodes.size} business units.`;
+      } else {
+        matchStatus = 'MATCH_FOUND';
+        message = 'Caller identified.';
+      }
+
+      const matchingCustomer = customers[0] || null;
+      const matchingLead = leads[0] || null;
+      const authorizedNotes = matchingLead?.notes || matchingCustomer?.notes?.[0]?.content || null;
+
+      return {
+        matchStatus,
+        message,
+        matchingCustomer,
+        matchingLead,
+        matches,
+        relevantCalls: callSessions.map(c => ({
+          id: c.id,
+          callSid: c.reason || c.id,
+          direction: (c.transferHistory as any)?.direction || (c.reason?.startsWith('call_outbound_') ? 'OUTBOUND' : 'INBOUND'),
+          status: c.status,
+          startedAt: c.startedAt || c.createdAt,
+          duration: c.duration || 0,
+          unit: c.unit?.name || null,
+          department: c.department?.name || null,
+          summary: (c.liveNotes as any)?.current || (c.liveNotes as any)?.text || (c.draftNotes as any)?.notes || null,
+        })),
+        lastContactDate,
+        authorizedNotes,
+        normalizedPhone: e164 || phoneNumber,
+      };
+    } catch (err: any) {
+      this.logger.error(`[CROSS-UNIT-LOOKUP] Lookup failed for ${phoneNumber}: ${err.message}`, err.stack);
+      return {
+        matchStatus: 'LOOKUP_FAILED' as const,
+        message: 'Caller history temporarily unavailable.',
+        matchingCustomer: null,
+        matchingLead: null,
+        matches: [],
+        relevantCalls: [],
+        lastContactDate: null,
+        authorizedNotes: null,
+        normalizedPhone: phoneNumber,
+      };
+    }
+  }
+
+  // ==========================================
+  // CRM CONTEXT & VOICEBOT
+  // ==========================================
+  async lookupCustomerContext(phoneNumber: string, user?: any) {
+    this.logger.log(`Looking up customer context for phone: ${phoneNumber}`);
+    try {
+      const lookup = await this.identifyCallerCrossUnit(phoneNumber, user);
+      const customer = lookup.matchingCustomer;
+      const lead = lookup.matchingLead;
 
       return {
         customer: customer || lead || null,
@@ -56,18 +323,16 @@ export class TelephonyService {
         priority: customer ? (customer as any).priority || 'Normal' : 'Normal',
         servicePlans: customer?.servicePlans || [],
         tickets: customer?.tickets || [],
+        crossUnitLookup: lookup,
       };
-    } catch (error) {
-      this.logger.error(
-        `Error looking up customer context: ${error.message}`,
-        error.stack,
-      );
+    } catch (error: any) {
+      this.logger.error(`Error looking up customer context: ${error.message}`, error.stack);
       return null;
     }
   }
 
   // ==========================================
-  // CALL SESSION TRACKING (PHASE 8)
+  // CALL SESSION TRACKING (PHASE 8 & 25)
   // ==========================================
   async createCallSession(
     callSid: string,
@@ -78,28 +343,296 @@ export class TelephonyService {
     phone?: string,
     leadId?: string,
     conversationId?: string,
+    extraMeta?: {
+      providerCallId?: string;
+      callerNumber?: string;
+      originalCallerId?: string;
+      calledNumber?: string;
+      provider?: string;
+      source?: string;
+      sourceType?: string;
+      campaign?: string;
+      trackingNumber?: string;
+      referralSource?: string;
+      sourceMetadata?: any;
+      callerMatchStatus?: string;
+      unitId?: string;
+      departmentId?: string;
+      queueId?: string;
+    }
   ) {
     this.logger.log(`Creating CallSession for ${callSid} in room ${roomName} leadId=${leadId} convId=${conversationId}`);
     try {
+      const existing = await this.prisma.callSession.findFirst({
+        where: {
+          OR: [
+            { reason: callSid },
+            ...(extraMeta?.providerCallId ? [{ providerCallId: extraMeta.providerCallId }] : []),
+          ]
+        }
+      });
+
+      if (existing) {
+        return await this.prisma.callSession.update({
+          where: { id: existing.id },
+          data: {
+            customerId: customerId || existing.customerId || undefined,
+            leadId: leadId || existing.leadId || undefined,
+            calleeUserId: agentId || existing.calleeUserId || undefined,
+            callerNumber: extraMeta?.callerNumber || existing.callerNumber || phone || undefined,
+            calledNumber: extraMeta?.calledNumber || existing.calledNumber || undefined,
+            source: extraMeta?.source || existing.source || undefined,
+            sourceType: extraMeta?.sourceType || existing.sourceType || undefined,
+            campaign: extraMeta?.campaign || existing.campaign || undefined,
+            callerMatchStatus: extraMeta?.callerMatchStatus || existing.callerMatchStatus || undefined,
+            unitId: extraMeta?.unitId || existing.unitId || undefined,
+          }
+        });
+      }
+
       return await this.prisma.callSession.create({
         data: {
-          reason: callSid, // Store Vobiz CallSid here since it's not a valid UUID
+          reason: callSid,
+          providerCallId: extraMeta?.providerCallId || callSid,
+          callerNumber: extraMeta?.callerNumber || phone || undefined,
+          originalCallerId: extraMeta?.originalCallerId || phone || undefined,
+          calledNumber: extraMeta?.calledNumber || undefined,
+          direction: (direction || 'INBOUND').toUpperCase(),
+          provider: extraMeta?.provider || 'vobiz',
+          source: extraMeta?.source || undefined,
+          sourceType: extraMeta?.sourceType || 'UNKNOWN',
+          campaign: extraMeta?.campaign || undefined,
+          trackingNumber: extraMeta?.trackingNumber || undefined,
+          referralSource: extraMeta?.referralSource || undefined,
+          sourceMetadata: extraMeta?.sourceMetadata || undefined,
+          callerMatchStatus: extraMeta?.callerMatchStatus || undefined,
+          unitId: extraMeta?.unitId || undefined,
+          departmentId: extraMeta?.departmentId || undefined,
+          queueId: extraMeta?.queueId || undefined,
           customerId: customerId || undefined,
           leadId: leadId || undefined,
           conversationId: conversationId || undefined,
-          calleeUserId: agentId, // mapped to agent user ID theoretically
+          calleeUserId: agentId,
           status: 'RINGING',
           startedAt: new Date(),
           livekitRoom: roomName,
           transferHistory: { direction: direction || 'unknown', phone: phone || null },
           participants: {
-            create: [], // will add later on connect
+            create: [],
           },
         },
       });
-    } catch (e) {
+    } catch (e: any) {
       this.logger.error(`Failed to create CallSession: ${e.message}`);
     }
+  }
+
+  // ==========================================
+  // PHASE 25: NOTES DRAFTS & DISPOSITION COMPLETION
+  // ==========================================
+  async saveCallDraftNotes(callSid: string, draftData: any, user?: any) {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const isUuid = UUID_REGEX.test(callSid);
+    const session = await this.prisma.callSession.findFirst({
+      where: isUuid
+        ? { OR: [{ id: callSid }, { reason: callSid }, { livekitRoom: callSid }] }
+        : { OR: [{ reason: callSid }, { livekitRoom: callSid }] },
+    });
+    if (!session) {
+      throw new NotFoundException(`CallSession ${callSid} not found`);
+    }
+
+    const timestamp = new Date().toISOString();
+    const agentName = user?.name || user?.email || 'Agent';
+
+    const draftNotesPayload = {
+      notes: draftData.notes || draftData.summary || '',
+      requirement: draftData.requirement || '',
+      requestedService: draftData.requestedService || '',
+      department: draftData.department || '',
+      disposition: draftData.disposition || draftData.outcome || null,
+      enquiryCategory: draftData.enquiryCategory || null,
+      followupDate: draftData.followupDate || null,
+      lastSavedAt: timestamp,
+      author: agentName,
+    };
+
+    const existingLiveNotes = (session.liveNotes as any) || {};
+    const history = Array.isArray(existingLiveNotes.history) ? existingLiveNotes.history : [];
+    if (draftData.notes) {
+      history.push({ text: draftData.notes, timestamp, author: agentName });
+    }
+
+    const updated = await this.prisma.callSession.update({
+      where: { id: session.id },
+      data: {
+        draftNotes: draftNotesPayload,
+        liveNotes: {
+          current: draftData.notes || existingLiveNotes.current || '',
+          lastUpdated: timestamp,
+          lastAuthor: agentName,
+          history: history.slice(-20),
+        },
+      },
+    });
+
+    return {
+      success: true,
+      savedAt: timestamp,
+      callSessionId: updated.id,
+      draftNotes: draftNotesPayload,
+    };
+  }
+
+  async completeCallDocumentation(callSid: string, data: any, user?: any) {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const isUuid = UUID_REGEX.test(callSid);
+    const session = await this.prisma.callSession.findFirst({
+      where: isUuid
+        ? { OR: [{ id: callSid }, { reason: callSid }, { livekitRoom: callSid }] }
+        : { OR: [{ reason: callSid }, { livekitRoom: callSid }] },
+      include: { customer: true, lead: true },
+    });
+    if (!session) {
+      throw new NotFoundException(`CallSession ${callSid} not found`);
+    }
+
+    const summary = (data.summary || data.notes || '').trim();
+    if (!summary || summary.length < 5) {
+      throw new BadRequestException('A meaningful interaction summary or documented reason no conversation took place is required.');
+    }
+
+    const VALID_DISPOSITIONS = ['COMPLETED', 'UNANSWERED', 'BUSY', 'FAILED', 'CANCELLED'];
+    const disposition = String(data.disposition || data.outcome || 'COMPLETED').toUpperCase();
+    if (!VALID_DISPOSITIONS.includes(disposition)) {
+      throw new BadRequestException(`Valid call disposition required (${VALID_DISPOSITIONS.join(', ')})`);
+    }
+
+    const enquiryCategory = data.enquiryCategory || data.category || session.lead?.enquiryCategory || null;
+    let targetUnitCode = 'UEC';
+    let targetDeptName = 'General Care Coordination';
+
+    if (enquiryCategory === 'JOB_ENQUIRY') {
+      targetUnitCode = 'UEC';
+      targetDeptName = 'Careers & HR Recruitment';
+    } else if (enquiryCategory === 'AMBULANCE' || data.primaryService?.toLowerCase().includes('ambulance') || data.isAmbulance) {
+      targetUnitCode = 'AMBULANCE';
+      targetDeptName = 'Ambulance & Emergency Dispatch';
+    } else if (enquiryCategory === 'SERVICE_ENQUIRY') {
+      if (data.foundation === 'UNCF' || data.foundation === 'A_CARE') {
+        targetUnitCode = 'UNCF';
+        targetDeptName = 'Home Nursing & Care';
+      } else {
+        targetUnitCode = 'UEC';
+        targetDeptName = 'Elder Care & Residential Intake';
+      }
+    }
+
+    const targetUnit = await this.prisma.businessUnit.findFirst({
+      where: { code: targetUnitCode }
+    });
+
+    let deptId = session.departmentId;
+    if (targetDeptName) {
+      const dept = await this.prisma.department.findFirst({
+        where: { name: { contains: targetDeptName, mode: 'insensitive' } }
+      });
+      if (dept) deptId = dept.id;
+    }
+
+    let leadId = session.leadId;
+    const callerPhone = session.callerNumber || session.customer?.phone || data.phone;
+    if (!leadId && callerPhone && (data.customerName || data.enquirerName)) {
+      const cleanPhone = this.normalizePhone(callerPhone).e164 || callerPhone;
+      const newLead = await this.prisma.lead.create({
+        data: {
+          customerName: data.customerName || data.enquirerName || session.customer?.name || 'Inbound Enquirer',
+          phoneNumber: cleanPhone,
+          serviceInterest: data.primaryService || data.serviceCategory || targetDeptName,
+          source: session.source || 'Inbound Call',
+          status: data.followupDate ? 'FOLLOWUP_REQUIRED' : 'NEW',
+          foundation: targetUnitCode,
+          unitId: targetUnit?.id || null,
+          enquiryCategory: enquiryCategory as any,
+          primaryService: data.primaryService || null,
+          notes: summary,
+          assignedAgentId: user?.agentId || null,
+        }
+      });
+      leadId = newLead.id;
+    } else if (leadId) {
+      const existingLead = await this.prisma.lead.findUnique({ where: { id: leadId } });
+      if (existingLead && targetUnit && existingLead.unitId && existingLead.unitId !== targetUnit.id) {
+        await this.prisma.leadTransferAudit.create({
+          data: {
+            leadId,
+            sourceUnitId: existingLead.unitId,
+            destUnitId: targetUnit.id,
+            reason: `Post-call classification: ${enquiryCategory || targetDeptName}`,
+            transferredById: user?.id || null,
+            status: 'COMPLETED',
+          }
+        }).catch(() => {});
+      }
+
+      await this.prisma.lead.update({
+        where: { id: leadId },
+        data: {
+          ...(data.customerName ? { customerName: data.customerName } : {}),
+          ...(targetUnit ? { unitId: targetUnit.id, foundation: targetUnitCode } : {}),
+          ...(enquiryCategory ? { enquiryCategory: enquiryCategory as any } : {}),
+          ...(data.primaryService ? { primaryService: data.primaryService } : {}),
+          ...(data.followupDate ? { status: 'FOLLOWUP_REQUIRED' } : {}),
+          notes: summary,
+        }
+      });
+    }
+
+    if (data.followupDate && leadId) {
+      await this.prisma.leadFollowup.create({
+        data: {
+          leadId,
+          assignedAgentId: user?.agentId || session.calleeUserId || (await this.prisma.agent.findFirst())?.id || '',
+          followupDate: new Date(data.followupDate),
+          meetingType: 'CALLBACK',
+          notes: `Post-call callback: ${summary}`,
+          status: 'PENDING',
+        }
+      }).catch(() => {});
+    }
+
+    if (session.customerId) {
+      await this.prisma.customerNote.create({
+        data: {
+          customerId: session.customerId,
+          content: `Call Summary (${disposition}): ${summary}`,
+        }
+      }).catch(() => {});
+    }
+
+    const updated = await this.prisma.callSession.update({
+      where: { id: session.id },
+      data: {
+        disposition,
+        enquiryCategory: enquiryCategory as any,
+        unitId: targetUnit?.id || session.unitId,
+        departmentId: deptId || session.departmentId,
+        leadId,
+        draftNotes: Prisma.DbNull,
+        liveNotes: {
+          current: summary,
+          completedAt: new Date().toISOString(),
+          agent: user?.name || user?.email || 'Agent',
+        }
+      },
+      include: { customer: true, lead: true, unit: true }
+    });
+
+    return {
+      success: true,
+      callSession: updated,
+      message: 'Call documentation persisted successfully.'
+    };
   }
 
   async acceptCallSession(callSid: string, userIdOrAgentId: string) {
@@ -2396,13 +2929,73 @@ export class TelephonyService {
 
       this.logger.log(`[INBOUND-TRACE] CALL_SESSION_LOOKUP | callId=${event.providerCallId}`);
 
-      const customerContext = await this.lookupCustomerContext(event.fromNumber);
+      // Phase 25: E.164 Phone Normalization & Cross-Unit Caller Identification
+      const phoneNorm = this.normalizePhone(event.fromNumber);
+      const normalizedCaller = phoneNorm.e164 || event.fromNumber;
+      const crossUnitLookup = await this.identifyCallerCrossUnit(normalizedCaller);
 
-      // Phase 16: Queue Classification & Emergency Priority Check
+      let resolvedCustomerId = crossUnitLookup.matchingCustomer?.id || null;
+      let resolvedLeadId = crossUnitLookup.matchingLead?.id || null;
+
+      // Section F: First-Call Customer & Lead Persistence for unknown callers
+      if (!resolvedCustomerId && phoneNorm.e164) {
+        try {
+          const newContact = await this.prisma.customer.upsert({
+            where: { phone: phoneNorm.e164 },
+            update: {},
+            create: {
+              name: 'Unverified Contact',
+              phone: phoneNorm.e164,
+              profileEnriched: false,
+            },
+          });
+          resolvedCustomerId = newContact.id;
+          crossUnitLookup.matchingCustomer = {
+            ...newContact,
+            notes: [],
+            servicePlans: [],
+            tickets: [],
+          } as any;
+        } catch (err: any) {
+          this.logger.warn(`[INBOUND-FIRST-CALL] Could not create first-call contact for ${phoneNorm.e164}: ${err.message}`);
+        }
+      }
+
+      const customerContext = {
+        customer: crossUnitLookup.matchingCustomer,
+        lead: crossUnitLookup.matchingLead,
+        priority: crossUnitLookup.matchingLead?.priority === 'EMERGENCY' ? 'Emergency' : 'Normal',
+        servicePlans: (crossUnitLookup.matchingCustomer as any)?.servicePlans || [],
+        tickets: (crossUnitLookup.matchingCustomer as any)?.tickets || [],
+        crossUnitLookup,
+      };
+
+      // Phase 16 & 25: Queue Classification & Emergency Priority Check
       const isEmergency = Boolean(
-        (customerContext?.customer as any)?.servicePlans?.some((p: any) => p.planType === 'EMERGENCY' || p.planType === 'AMBULANCE') ||
-        (customerContext?.customer as any)?.isEmergency
+        crossUnitLookup.matchingLead?.isAmbulanceEmergency ||
+        crossUnitLookup.matchingLead?.priority === 'EMERGENCY' ||
+        (crossUnitLookup.matchingCustomer as any)?.servicePlans?.some((p: any) => p.planType === 'EMERGENCY' || p.planType === 'AMBULANCE') ||
+        (crossUnitLookup.matchingCustomer as any)?.isEmergency ||
+        event.toNumber?.includes('108') ||
+        event.campaign?.toLowerCase().includes('emergency')
       );
+
+      // Prepare Phase 25 Source Attribution Metadata
+      const extraMeta = {
+        providerCallId: event.providerCallId,
+        callerNumber: normalizedCaller,
+        originalCallerId: event.originalCallerId || event.fromNumber,
+        calledNumber: event.toNumber,
+        provider: event.provider || 'vobiz',
+        source: event.source || (event.sourceType === 'INFERRED' ? 'Primary Inbound Trunk (+918064267760)' : undefined),
+        sourceType: event.sourceType || 'UNKNOWN',
+        campaign: event.campaign || undefined,
+        trackingNumber: event.trackingNumber || event.toNumber,
+        referralSource: event.referralSource || undefined,
+        sourceMetadata: event.sourceMetadata || undefined,
+        callerMatchStatus: crossUnitLookup.matchStatus,
+        unitId: crossUnitLookup.matchingLead?.unit?.id || undefined,
+      };
 
       let assignedAgent = null;
       for (let i = 0; i < 5; i++) {
@@ -2448,7 +3041,7 @@ export class TelephonyService {
           this.logger.warn(`[INBOUND-CAPACITY] Carrier capacity limit reached: ${capRes.reason}. Enqueueing to waiting pool.`);
           await this.queueService.enqueueCallItem(
             event.providerCallId,
-            customerContext?.customer?.id,
+            resolvedCustomerId || undefined,
             isEmergency ? 'EMERGENCY' : 'GENERAL',
             isEmergency ? 'EMERGENCY' : 'NORMAL'
           );
@@ -2472,20 +3065,22 @@ export class TelephonyService {
         this.logger.warn(`No agents available for call ${event.providerCallId}. Enqueueing to waiting pool.`);
         await this.queueService.enqueueCallItem(
           event.providerCallId,
-          customerContext?.customer?.id,
+          resolvedCustomerId || undefined,
           isEmergency ? 'EMERGENCY' : 'GENERAL',
           isEmergency ? 'EMERGENCY' : 'NORMAL'
         );
-        // Persist enqueued CallSession so the call lifecycle is durably tracked!
+        // Persist enqueued CallSession with Phase 25 metadata so the call lifecycle is durably tracked!
         try {
           await this.createCallSession(
             event.providerCallId,
             `call_${event.providerCallId}`,
-            customerContext?.customer?.id,
+            resolvedCustomerId || undefined,
             undefined,
             'inbound',
-            event.fromNumber,
-            customerContext?.lead?.id,
+            normalizedCaller,
+            resolvedLeadId || undefined,
+            undefined,
+            extraMeta,
           );
           await this.prisma.callSession.updateMany({
             where: { reason: event.providerCallId },
@@ -2554,19 +3149,21 @@ export class TelephonyService {
       }, 200);
 
       if (event.direction === 'INBOUND') {
-        this.logger.log(`[INBOUND-CALL] session_create_start | caller=${event.fromNumber} DID=${event.toNumber} providerCallUUID=${event.providerCallId}`);
+        this.logger.log(`[INBOUND-CALL] session_create_start | caller=${normalizedCaller} DID=${event.toNumber} providerCallUUID=${event.providerCallId}`);
       }
 
-      // Await session creation to ensure persistence before dispatch (Fix DEF-06: pass customerContext?.lead?.id)
+      let session: any = null;
       try {
-        const session = await this.createCallSession(
+        session = await this.createCallSession(
           event.providerCallId,
           roomName,
-          customerContext?.customer?.id,
+          resolvedCustomerId || undefined,
           assignedAgent.userId,
           event.direction || 'inbound',
-          event.fromNumber,
-          customerContext?.lead?.id, // Fix DEF-06: Associate Lead!
+          normalizedCaller,
+          resolvedLeadId || undefined,
+          undefined,
+          extraMeta,
         );
 
         if (session && inboundReservationToken) {
@@ -2584,7 +3181,7 @@ export class TelephonyService {
 
         this.logger.log(`[INBOUND-TRACE] CALL_SESSION_CREATED | callId=${session?.id} providerCallId=${event.providerCallId} direction=inbound provider=${event.provider} status=${session?.status}`);
         if (event.direction === 'INBOUND') {
-          this.logger.log(`[INBOUND-CALL] session_created | session_id=${session?.id} caller=${event.fromNumber} DID=${event.toNumber} providerCallUUID=${event.providerCallId} direction=inbound status=${session?.status}`);
+          this.logger.log(`[INBOUND-CALL] session_created | session_id=${session?.id} caller=${normalizedCaller} DID=${event.toNumber} providerCallUUID=${event.providerCallId} direction=inbound status=${session?.status}`);
         }
       } catch (e: any) {
         if (event.direction === 'INBOUND') {
@@ -2602,17 +3199,25 @@ export class TelephonyService {
 
       this.logger.log(`[INBOUND-E2E] STEP=BEFORE_GATEWAY_DISPATCH | callId=${event.providerCallId} providerCallId=${event.providerCallId} direction=${event.direction} agentId=${assignedAgent.id} agentName=${assignedAgent.name} roomName=${roomName} tokenPresent=${!!token}`);
 
-      // Dispatch via Gateway
+      // Dispatch via Gateway with complete Phase 25 cross-unit caller intelligence
       this.telephonyGateway.dispatchIncomingCallToAgent(
         assignedAgent.socketId,
         {
-          caller: event.fromNumber,
-          phone: event.fromNumber,
+          caller: normalizedCaller,
+          phone: normalizedCaller,
+          originalCallerId: event.originalCallerId || event.fromNumber,
+          calledNumber: event.toNumber,
           callSid: event.providerCallId,
+          sessionId: session?.id,
           roomName,
           timestamp: Date.now(),
-          source: event.provider,
+          source: event.source || event.provider,
+          sourceType: event.sourceType || 'UNKNOWN',
+          campaign: event.campaign || null,
+          trackingNumber: event.trackingNumber || event.toNumber,
+          referralSource: event.referralSource || null,
           customerContext,
+          crossUnitLookup,
           assignedAgent: {
             id: assignedAgent.id,
             name: assignedAgent.name,
