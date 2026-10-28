@@ -220,6 +220,7 @@ export class TelephonyController {
         assignedAgent: { id: agent.id, name: agent.name },
         crossUnitLookup,
         token,
+        direction: callSession.direction || 'INBOUND',
       },
     };
   }

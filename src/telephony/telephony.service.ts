@@ -363,6 +363,8 @@ export class TelephonyService {
   ) {
     this.logger.log(`Creating CallSession for ${callSid} in room ${roomName} leadId=${leadId} convId=${conversationId}`);
     try {
+      const isOutbound = (direction || '').toUpperCase() === 'OUTBOUND' || (roomName || '').startsWith('call_outbound_');
+
       const existing = await this.prisma.callSession.findFirst({
         where: {
           OR: [
@@ -378,10 +380,11 @@ export class TelephonyService {
           data: {
             customerId: customerId || existing.customerId || undefined,
             leadId: leadId || existing.leadId || undefined,
-            calleeUserId: agentId || existing.calleeUserId || undefined,
+            callerUserId: isOutbound ? (agentId || existing.callerUserId || undefined) : existing.callerUserId,
+            calleeUserId: !isOutbound ? (agentId || existing.calleeUserId || undefined) : existing.calleeUserId,
             callerNumber: extraMeta?.callerNumber || existing.callerNumber || phone || undefined,
-            calledNumber: extraMeta?.calledNumber || existing.calledNumber || undefined,
-            source: extraMeta?.source || existing.source || undefined,
+            calledNumber: extraMeta?.calledNumber || existing.calledNumber || (isOutbound ? phone : undefined),
+            source: extraMeta?.source || existing.source || (isOutbound ? 'OUTBOUND_DIALER' : undefined),
             sourceType: extraMeta?.sourceType || existing.sourceType || undefined,
             campaign: extraMeta?.campaign || existing.campaign || undefined,
             callerMatchStatus: extraMeta?.callerMatchStatus || existing.callerMatchStatus || undefined,
@@ -396,10 +399,10 @@ export class TelephonyService {
           providerCallId: extraMeta?.providerCallId || callSid,
           callerNumber: extraMeta?.callerNumber || phone || undefined,
           originalCallerId: extraMeta?.originalCallerId || phone || undefined,
-          calledNumber: extraMeta?.calledNumber || undefined,
+          calledNumber: extraMeta?.calledNumber || (isOutbound ? phone : undefined),
           direction: (direction || 'INBOUND').toUpperCase(),
           provider: extraMeta?.provider || 'vobiz',
-          source: extraMeta?.source || undefined,
+          source: extraMeta?.source || (isOutbound ? 'OUTBOUND_DIALER' : undefined),
           sourceType: extraMeta?.sourceType || 'UNKNOWN',
           campaign: extraMeta?.campaign || undefined,
           trackingNumber: extraMeta?.trackingNumber || undefined,
@@ -412,13 +415,14 @@ export class TelephonyService {
           customerId: customerId || undefined,
           leadId: leadId || undefined,
           conversationId: conversationId || undefined,
-          calleeUserId: agentId,
-          status: 'RINGING',
+          callerUserId: isOutbound ? agentId : undefined,
+          calleeUserId: isOutbound ? undefined : agentId,
+          status: isOutbound ? 'IN_PROGRESS' : 'RINGING',
           startedAt: new Date(),
           livekitRoom: roomName,
           transferHistory: { direction: direction || 'unknown', phone: phone || null },
           participants: {
-            create: [],
+            create: agentId ? [{ agentId: agentId, role: 'AGENT' }] : [],
           },
         },
       });
@@ -2679,10 +2683,15 @@ export class TelephonyService {
 
     const targetIds = [agent.id, agent.userId].filter((id): id is string => Boolean(id));
 
-    // Find a ringing call session assigned to this agent
+    // Find a ringing call session assigned to this agent (strictly INBOUND calls only)
     const callSession = await this.prisma.callSession.findFirst({
       where: {
         status: 'RINGING',
+        direction: { not: 'OUTBOUND' },
+        NOT: [
+          { reason: { startsWith: 'call_outbound_' } },
+          { livekitRoom: { startsWith: 'call_outbound_' } },
+        ],
         OR: [
           { calleeUserId: { in: targetIds } },
           { participants: { some: { agentId: { in: targetIds }, role: 'AGENT' } } },
@@ -2693,6 +2702,11 @@ export class TelephonyService {
     });
 
     if (!callSession) return null;
+
+    // Safety guard: ensure the agent is not the caller who placed an outbound dial
+    if (callSession.callerUserId && targetIds.includes(callSession.callerUserId)) {
+      return null;
+    }
 
     return { callSession, agent };
   }
@@ -3381,16 +3395,40 @@ export class TelephonyService {
         agent = await this.prisma.agent.findUnique({ where: { id: request.agentId } });
       }
 
+      // Resolve customer/lead cross-unit intelligence for destination number
+      let resolvedCustomerId = request.contactId;
+      let resolvedLeadId = request.leadId;
+      let crossUnitLookup: any = null;
+      try {
+        crossUnitLookup = await this.identifyCallerCrossUnit(
+          request.to, 
+          agent ? { id: agent.userId, role: 'AGENT' } : null
+        );
+        if (crossUnitLookup?.matchingCustomer && !resolvedCustomerId) {
+          resolvedCustomerId = crossUnitLookup.matchingCustomer.id;
+        }
+        if (crossUnitLookup?.matchingLead && !resolvedLeadId) {
+          resolvedLeadId = crossUnitLookup.matchingLead.id;
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed cross-unit lookup for outbound call to ${request.to}: ${err.message}`);
+      }
+
       // Create Call Session tracking record in the background
       await this.createCallSession(
         callSid,
         roomName,
-        request.contactId, // Associate customer
+        resolvedCustomerId, // Associate customer
         agent?.userId,
         'outbound',
         request.to,
-        request.leadId,
+        resolvedLeadId,
         request.conversationId,
+        {
+          callerNumber: request.to,
+          calledNumber: request.to,
+          callerMatchStatus: crossUnitLookup?.matchStatus || 'MATCH_FOUND',
+        }
       );
 
       // Persist provider and reservation token onto session for terminal reconciliation
@@ -3436,6 +3474,12 @@ export class TelephonyService {
     // Recording begins strictly when the customer answers the call (CUSTOMER_ANSWERED stage).
 
     const livekitWsUrl = process.env.LIVEKIT_WS_URL || process.env.LIVEKIT_API_URL;
+    const customerDisplayName = 
+      crossUnitLookup?.name || 
+      crossUnitLookup?.matchingCustomer?.name || 
+      crossUnitLookup?.matchingLead?.customerName || 
+      'Customer';
+
     return {
       success: true,
       roomName,
@@ -3443,7 +3487,15 @@ export class TelephonyService {
       serverUrl: livekitWsUrl,
       wsUrl: livekitWsUrl,
       provider: providerType,
-      providerResponse
+      providerResponse,
+      customerName: customerDisplayName,
+      customerId: resolvedCustomerId,
+      leadId: resolvedLeadId,
+      crossUnitLookup,
+      customerContext: {
+        customer: crossUnitLookup?.matchingCustomer,
+        lead: crossUnitLookup?.matchingLead,
+      },
     };
     } catch (err: any) {
       if (this.capacityService) {
