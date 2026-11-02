@@ -167,7 +167,7 @@ export class VobizProvider implements TelephonyProvider {
   generateBusyResponse(): string {
     return `
 <Response>
-    <Speak>Thank you for calling ElderCare. All our care coordinators are currently assisting other families. Please hold while we connect you to the next available agent.</Speak>
+    <Speak>Thank you for calling support. All our care coordinators are currently assisting other callers. Please hold while we connect you to the next available agent.</Speak>
 </Response>`.trim();
   }
 

@@ -75,7 +75,7 @@ export class SuperAdminController {
     @Query('unitId') unitId: string,
     @Req() req: any,
   ) {
-    const actorEmail = req.user?.email || 'super_admin@eldercare.com';
+    const actorEmail = req.user?.email || 'super_admin@crmtool.com';
     return this.superAdminService.testIntegration(provider, unitId, actorEmail);
   }
 
@@ -89,7 +89,7 @@ export class SuperAdminController {
     @Body() body: any,
     @Req() req: any,
   ) {
-    const actorEmail = req.user?.email || 'super_admin@eldercare.com';
+    const actorEmail = req.user?.email || 'super_admin@crmtool.com';
     return this.superAdminService.updateIntegration(provider, body, actorEmail);
   }
 
@@ -105,7 +105,7 @@ export class SuperAdminController {
   @Post('units')
   @Roles('SUPER_ADMIN')
   async createBusinessUnit(@Body() body: any, @Req() req: any) {
-    const actorEmail = req.user?.email || 'super_admin@eldercare.com';
+    const actorEmail = req.user?.email || 'super_admin@crmtool.com';
     return this.superAdminService.createBusinessUnit(body, actorEmail);
   }
 
@@ -116,7 +116,7 @@ export class SuperAdminController {
     @Body() body: any,
     @Req() req: any,
   ) {
-    const actorEmail = req.user?.email || 'super_admin@eldercare.com';
+    const actorEmail = req.user?.email || 'super_admin@crmtool.com';
     return this.superAdminService.updateBusinessUnit(id, body, actorEmail);
   }
 
@@ -153,7 +153,7 @@ export class SuperAdminController {
   @Post('leads/transfer')
   @Roles('SUPER_ADMIN')
   async transferLead(@Body() body: any, @Req() req: any) {
-    const actorEmail = req.user?.email || 'super_admin@eldercare.com';
+    const actorEmail = req.user?.email || 'super_admin@crmtool.com';
     const actorUserId = req.user?.userId || req.user?.id || req.user?.sub;
     return this.superAdminService.transferLead(body, actorEmail, actorUserId);
   }

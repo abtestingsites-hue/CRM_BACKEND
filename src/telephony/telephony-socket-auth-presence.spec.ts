@@ -48,7 +48,7 @@ class MockPrismaService {
       id: 'raghav-agent-id',
       userId: 'raghav-user-id',
       name: 'Raghav',
-      department: 'ElderCare Specialists',
+      department: 'Customer Care Specialists',
       status: 'OFFLINE',
       socketId: null,
       lastActive: new Date(),
@@ -147,7 +147,7 @@ class MockSocketServer {
 
 async function runTestSuite() {
   console.log(`\n${BOLD}${CYAN}================================================================${RESET}`);
-  console.log(`${BOLD}${CYAN}  ELDERCARE CRM — TELEPHONY GATEWAY WEBSOCKET REGRESSION SUITE  ${RESET}`);
+  console.log(`${BOLD}${CYAN}  CRM TOOL — TELEPHONY GATEWAY WEBSOCKET REGRESSION SUITE  ${RESET}`);
   console.log(`${BOLD}${CYAN}================================================================${RESET}\n`);
 
   const JWT_SECRET = process.env.JWT_SECRET || 'supersecretjwtkeyforerpsystem';

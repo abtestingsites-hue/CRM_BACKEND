@@ -1,6 +1,6 @@
 /**
  * COMPREHENSIVE AUTOMATED VERIFICATION SUITE
- * ElderCare CRM — Scalable Inbound Queue & Global Concurrency Orchestration Engine
+ * CRM Tool — Scalable Inbound Queue & Global Concurrency Orchestration Engine
  * 
  * Tests:
  * 1. Global Capacity Orchestrator (Dynamic Scaling, Inbound Reserve, Outbound Throttling, Held Calls)
@@ -195,7 +195,7 @@ class MockPrismaService {
 // TEST RUNNER
 async function runTelephonyTestSuite() {
   console.log('================================================================');
-  console.log('ELDERCARE CRM TELEPHONY CONCURRENCY & QUEUE ENGINE TEST SUITE');
+  console.log('CRM TOOL TELEPHONY CONCURRENCY & QUEUE ENGINE TEST SUITE');
   console.log('Timestamp: ' + new Date().toISOString());
   console.log('================================================================\n');
 

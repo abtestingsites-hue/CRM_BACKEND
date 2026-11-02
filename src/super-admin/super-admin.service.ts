@@ -327,7 +327,7 @@ export class SuperAdminService {
   /**
    * Phase 3 & 4: Real, Bounded Integration Connectivity Test
    */
-  async testIntegration(provider: string, unitId?: string, actorEmail = 'super_admin@eldercare.com') {
+  async testIntegration(provider: string, unitId?: string, actorEmail = 'super_admin@crmtool.com') {
     this.logger.log(`[SUPER-ADMIN] Testing integration provider=${provider} unitId=${unitId || 'GLOBAL'}`);
     const upperProvider = provider.toUpperCase();
 

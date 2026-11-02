@@ -239,7 +239,7 @@ export class EnquiryService {
         primaryService = 'Nursing Care at Home';
         subServices = ['Vitals Check & Injections'];
       } else {
-        primaryService = 'Elder Care at Home';
+        primaryService = 'Care at Home';
         subServices = ['Bedside Attendant'];
       }
     } else if (foundation === 'UEC') {
@@ -299,7 +299,7 @@ export class EnquiryService {
 
     // 6. Missing Info checklist
     const missingInfo: string[] = [];
-    if (!patientName) missingInfo.push('Patient / Elder Name');
+    if (!patientName) missingInfo.push('Patient / Client Name');
     if (!patientAge) missingInfo.push('Patient Age');
     if (!conversation.customer?.phone) missingInfo.push('Contact Phone Number');
     if (primaryService.includes('Home') || foundation === 'UHC' || foundation === 'A_CARE') {
@@ -667,7 +667,7 @@ export class EnquiryService {
             customerName: dto.enquirerName || session.customer?.name || 'Inbound Enquirer',
             phoneNumber: cleanPhone,
             email: dto.email || session.customer?.email || null,
-            serviceInterest: dto.primaryService || dto.serviceCategory || 'Elder Care',
+            serviceInterest: dto.primaryService || dto.serviceCategory || 'Care Services',
             source: (session as any).direction === 'OUTBOUND' || (session.reason && session.reason.includes('outbound')) ? 'Outbound Call' : (session.source || 'Inbound Call'),
             status: 'NEW',
             priority: isAmbulance ? LeadPriority.EMERGENCY : LeadPriority.NORMAL,
@@ -881,7 +881,7 @@ export class EnquiryService {
           customerName: dto.enquirerName || 'Enquirer',
           phoneNumber: cleanPhone,
           email: dto.email || null,
-          serviceInterest: dto.primaryService || dto.serviceCategory || 'Elder Care',
+          serviceInterest: dto.primaryService || dto.serviceCategory || 'Care Services',
           source: dto.source || 'Manual Entry',
           status: (dto.status as any) || 'NEW',
           priority: leadPriority,

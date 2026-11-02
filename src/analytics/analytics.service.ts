@@ -161,7 +161,7 @@ export class AnalyticsService {
       const tags = Array.isArray(feedback.tags) ? feedback.tags.join(', ') : '';
 
       const audioPrompt = `
-      Analyze the following customer service call audio for an ElderCare CRM.
+      Analyze the following customer service call audio for an Enterprise CRM.
       Customer: ${customerName} (${customerPhone}). Agent: ${agentName}. Duration: ${durationSeconds}s.
 
       Please provide a JSON response with the following strictly formatted fields:
@@ -180,7 +180,7 @@ export class AnalyticsService {
       `;
 
       const metadataPrompt = `
-      Analyze the following customer interaction records for an ElderCare CRM:
+      Analyze the following customer interaction records for an Enterprise CRM:
       - Call ID: ${session.id}
       - Reference: ${session.reason || session.livekitRoom || 'Direct Call'}
       - Duration: ${durationSeconds} seconds (${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s)

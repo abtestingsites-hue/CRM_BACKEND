@@ -42,8 +42,8 @@ export const SEED_SOP_TEMPLATES: SeedTemplate[] = [
       { stepOrder: 1, title: 'Verify Personal Identification & Address Proof', description: 'Collect Aadhaar/ID, Passport, address proof and verify details.', isMandatory: true, requiresAttachment: true, estimatedMinutes: 15, roleRequired: 'HR_COORDINATOR' },
       { stepOrder: 2, title: 'Background Check & Police Clearance', description: 'Initiate and review criminal background check and reference checks.', isMandatory: true, requiresAttachment: true, estimatedMinutes: 30, roleRequired: 'HR_MANAGER' },
       { stepOrder: 3, title: 'Medical Fitness & Vaccination Clearance', description: 'Review medical fitness certificate, TB screening, and vaccination history.', isMandatory: true, requiresAttachment: true, estimatedMinutes: 15, roleRequired: 'HR_COORDINATOR' },
-      { stepOrder: 4, title: 'Issue Employee ID & CRM Account Creation', description: 'Create user account in ElderCare CRM, assign department, designation, and unit.', isMandatory: true, requiresNotes: true, estimatedMinutes: 10, roleRequired: 'HR_COORDINATOR' },
-      { stepOrder: 5, title: 'SOP & Safety Training Acknowledgement', description: 'Ensure the employee signs and acknowledges all elder care and emergency protocols.', isMandatory: true, requiresNotes: true, estimatedMinutes: 20, roleRequired: 'HR_COORDINATOR' },
+      { stepOrder: 4, title: 'Issue Employee ID & CRM Account Creation', description: 'Create user account in CRM Tool, assign department, designation, and unit.', isMandatory: true, requiresNotes: true, estimatedMinutes: 10, roleRequired: 'HR_COORDINATOR' },
+      { stepOrder: 5, title: 'SOP & Safety Training Acknowledgement', description: 'Ensure the employee signs and acknowledges all operational safety and emergency protocols.', isMandatory: true, requiresNotes: true, estimatedMinutes: 20, roleRequired: 'HR_COORDINATOR' },
       { stepOrder: 6, title: 'Manager Sign-off & Onboarding Completion', description: 'Reporting manager final review and approval for deployment readiness.', isMandatory: true, estimatedMinutes: 10, roleRequired: 'HR_MANAGER' },
     ],
   },
@@ -115,7 +115,7 @@ export const SEED_SOP_TEMPLATES: SeedTemplate[] = [
     escalationHours: 4,
     steps: [
       { stepOrder: 1, title: 'Identify Caller & Verify Existing CRM Records', description: 'Search customer database by phone/email; link to existing customer or initiate new record.', isMandatory: true, estimatedMinutes: 5, roleRequired: 'CCR_AGENT' },
-      { stepOrder: 2, title: 'Capture Care Needs & Medical Context', description: 'Record patient age, primary diagnosis, care service interest (Elder Care, ICU at Home, Physio).', isMandatory: true, requiresNotes: true, estimatedMinutes: 10, roleRequired: 'CCR_AGENT' },
+      { stepOrder: 2, title: 'Capture Care Needs & Medical Context', description: 'Record patient age, primary diagnosis, care service interest (Specialized Care, ICU at Home, Physio).', isMandatory: true, requiresNotes: true, estimatedMinutes: 10, roleRequired: 'CCR_AGENT' },
       { stepOrder: 3, title: 'Classify Urgency & Assign Priority', description: 'Designate enquiry priority: Emergency, Immediate (24hr), or General Enquiry.', isMandatory: true, estimatedMinutes: 5, roleRequired: 'CCR_AGENT' },
       { stepOrder: 4, title: 'Route to Sales or Care Coordinator', description: 'Forward qualified care requirements to Sales Team or dispatch immediate emergency alert.', isMandatory: true, requiresNotes: true, estimatedMinutes: 5, roleRequired: 'CCR_AGENT' },
     ],
@@ -162,7 +162,7 @@ export const SEED_SOP_TEMPLATES: SeedTemplate[] = [
   {
     code: 'SAL-QLF-01',
     title: 'Lead Qualification & Care Plan Assessment',
-    description: 'Procedure for contacting new elder care leads, establishing clinical suitability, and structuring care packages.',
+    description: 'Procedure for contacting new care leads, establishing clinical suitability, and structuring care packages.',
     department: SopDepartment.SALES,
     category: 'Lead Qualification',
     priority: SopPriority.HIGH,

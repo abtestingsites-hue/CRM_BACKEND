@@ -46,7 +46,7 @@ export class SopController {
     return {
       userId: req?.headers['x-user-id'] || 'system-admin',
       id: req?.headers['x-user-id'] || 'system-admin',
-      email: req?.headers['x-user-email'] || 'admin@eldercare.com',
+      email: req?.headers['x-user-email'] || 'admin@crmtool.com',
       role: req?.headers['x-user-role'] || 'SUPER_ADMIN',
     };
   }

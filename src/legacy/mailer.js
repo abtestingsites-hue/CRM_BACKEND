@@ -20,7 +20,7 @@ const sendEmailReply = async (toEmail, subject, htmlBody, inReplyTo, references)
   }
   try {
     const mailOptions = {
-      from: `"ElderCare CRM" <${user}>`,
+      from: `"CRM Tool" <${user}>`,
       to: toEmail,
       subject: subject,
       html: htmlBody,

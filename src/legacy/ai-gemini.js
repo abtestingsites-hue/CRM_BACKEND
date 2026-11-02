@@ -46,12 +46,12 @@ async function analyzeLeadSentiment(transcript, agentNotes) {
 async function analyzeElderCareEnquiry(transcript, customerContext = '') {
   try {
     const prompt = `
-      You are an expert Clinical Intake & Sales AI for ElderCare CRM (ARTIBOTS INNOVATION / Paramantra).
+      You are an expert Clinical Intake & Sales AI for CRM Tool (ARTIBOTS INNOVATION / Paramantra).
       Analyze the customer conversation transcript and context carefully.
       
       Extract and infer accurate intelligence strictly based on the text. Do NOT fabricate facts. If a detail is missing or not provided, return null or an empty array.
       
-      Supported Primary Services for ElderCare:
+      Supported Primary Services for CRM Tool:
       - "Assisted Living"
       - "Dementia / Alzheimer's Care"
       - "Post-operative Care"
@@ -145,7 +145,7 @@ async function analyzeElderCareEnquiry(transcript, customerContext = '') {
       return parsed;
     }
   } catch (error) {
-    console.error('Gemini ElderCare Enquiry Analysis Error:', error.message);
+    console.error('Gemini CRM Tool Enquiry Analysis Error:', error.message);
 
     // Heuristic extraction fallback when AI provider is temporarily unavailable
     const lower = (transcript || '').toLowerCase();

@@ -25,7 +25,7 @@ function vobizWebhookRouter(io) {
       res.status(200).send(`
         <Response>
           <Gather numDigits="1" action="${baseUrl}/api/v1/webhooks/vobiz/ivr/existing">
-            <Say>Welcome back to Elderly Care. Press 1 for Billing. Press 2 for Home Care. Press 3 for Mobility. Press 4 for Emergency.</Say>
+            <Say>Welcome back to Customer Care. Press 1 for Billing. Press 2 for Home Care. Press 3 for Mobility. Press 4 for Emergency.</Say>
           </Gather>
         </Response>
       `);
@@ -34,7 +34,7 @@ function vobizWebhookRouter(io) {
       res.status(200).send(`
         <Response>
           <Gather numDigits="1" action="${baseUrl}/api/v1/webhooks/vobiz/ivr/new">
-            <Say>Welcome to Elderly Care. Press 1 for Elderly Care Services. Press 2 for Home Service. Press 3 for Consultation.</Say>
+            <Say>Welcome to Customer Care. Press 1 for Care Services. Press 2 for Home Service. Press 3 for Consultation.</Say>
           </Gather>
         </Response>
       `);

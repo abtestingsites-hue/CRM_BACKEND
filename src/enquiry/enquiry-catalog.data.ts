@@ -14,8 +14,8 @@ export interface FoundationCatalogDefinition {
 export const INITIAL_FOUNDATIONS: FoundationCatalogDefinition[] = [
   {
     key: 'UEC',
-    name: 'Universal Elder Care',
-    category: 'Elder Care & Residential Intake',
+    name: 'Universal Care',
+    category: 'Care & Residential Intake',
     services: [
       {
         name: 'Assisted Living',
@@ -56,13 +56,13 @@ export const INITIAL_FOUNDATIONS: FoundationCatalogDefinition[] = [
       {
         name: 'Home Care',
         code: 'UEC_HOME_CARE',
-        description: 'In-home caregiving and nursing support for elders in their own residence.',
+        description: 'In-home caregiving and nursing support for clients in their own residence.',
         subServices: ['12-Hour Day Attendant', '12-Hour Night Attendant', '24-Hour Live-in Caregiver', 'Visiting Nurse'],
       },
       {
         name: 'Other Care Requirements',
         code: 'UEC_OTHER_CARE',
-        description: 'Custom care plans tailored to individual elder and family requirements.',
+        description: 'Custom care plans tailored to individual client and family requirements.',
         subServices: ['Custom Care Plan', 'Short Respite Stay', 'Specialized Diet & Physical Therapy'],
       },
     ],
@@ -74,7 +74,7 @@ export const INITIAL_FOUNDATIONS: FoundationCatalogDefinition[] = [
     services: [
       { name: 'Doctor at Home', code: 'ACARE_DOCTOR_HOME', subServices: ['General Physician Visit', 'Geriatric Specialist Visit', 'Tele-consult Follow-up'] },
       { name: 'Nursing Care at Home', code: 'ACARE_NURSING_HOME', subServices: ['IV / IM Injections', 'Catheterization', 'Dressing / Wound Care', 'Tracheostomy Care'] },
-      { name: 'Elder Care at Home', code: 'ACARE_ELDER_CARE_HOME', subServices: ['Bedside Attendant', 'Companion Care', 'Hygiene & Feeding Assistance'] },
+      { name: 'Care Support at Home', code: 'ACARE_CARE_HOME', subServices: ['Bedside Attendant', 'Companion Care', 'Hygiene & Feeding Assistance'] },
       { name: 'Baby Care at Home', code: 'ACARE_BABY_CARE_HOME', subServices: ['Newborn Care Specialist', 'Post-Natal Mother Support', 'Lactation Assistance'] },
       { name: 'ICU Setup & Ryle\'s Tube Feeding at Home', code: 'ACARE_ICU_SETUP_HOME', subServices: ['Home ICU Ventilator Setup', 'Ryle\'s Tube Insertion & Feeding', 'Infusion Pump Setup', 'Critical Care Nurse'] },
       { name: 'Physiotherapy at Home', code: 'ACARE_PHYSIO_HOME', subServices: ['Orthopedic Rehabilitation', 'Stroke Recovery Physio', 'Chest Physiotherapy', 'Geriatric Mobility'] },
@@ -136,8 +136,8 @@ export const INITIAL_FOUNDATIONS: FoundationCatalogDefinition[] = [
   },
   {
     key: 'THATHA_PATTI',
-    name: 'Thatha Patti Elders Foundation',
-    category: 'Elders Community & Care',
+    name: 'Thatha Patti Foundation',
+    category: 'Community & Care',
     services: [
       { name: 'Assisted Living', code: 'TP_ASSISTED_LIVING', subServices: ['Senior Living Suites', 'Community Meals', 'Activity Centers'] },
       { name: 'Senior Day Care / Day Scholar', code: 'TP_DAY_CARE', subServices: ['Morning to Evening Care', 'Recreational Activities', 'Daytime Supervision'] },
@@ -147,9 +147,9 @@ export const INITIAL_FOUNDATIONS: FoundationCatalogDefinition[] = [
   {
     key: 'ZENCURA',
     name: 'Zencura',
-    category: 'Holistic Elder Wellness',
+    category: 'Holistic Wellness',
     services: [
-      { name: 'Holistic Elder Wellness', code: 'ZC_WELLNESS', subServices: ['Nutritional Guidance', 'Gentle Yoga & Breathing', 'Mental Wellness Coaching'] },
+      { name: 'Holistic Wellness', code: 'ZC_WELLNESS', subServices: ['Nutritional Guidance', 'Gentle Yoga & Breathing', 'Mental Wellness Coaching'] },
       { name: 'Memory Care Program', code: 'ZC_MEMORY_CARE', subServices: ['Cognitive Stimulation Games', 'Music Therapy', 'Reminiscence Therapy'] },
       { name: 'Preventive Health Checkup Packages', code: 'ZC_HEALTH_PACKAGES', subServices: ['Annual Senior Comprehensive Screen', 'Fall Risk Assessment', 'Bone Density Check'] },
     ],

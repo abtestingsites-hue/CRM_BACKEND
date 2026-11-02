@@ -197,7 +197,7 @@ export class TelephonyService {
         
         const unitObj = lead.unit 
           ? { id: lead.unit.id, code: lead.unit.code, name: lead.unit.name }
-          : { code: lead.foundation || 'UEC', name: lead.foundation || 'Universal ElderCare' };
+          : { code: lead.foundation || 'UEC', name: lead.foundation || 'Universal Care' };
 
         const notesContent = isAuthorized 
           ? (lead.notes || null)
@@ -528,7 +528,7 @@ export class TelephonyService {
         targetDeptName = 'Home Nursing & Care';
       } else {
         targetUnitCode = 'UEC';
-        targetDeptName = 'Elder Care & Residential Intake';
+        targetDeptName = 'Care & Residential Intake';
       }
     }
 
@@ -1857,7 +1857,7 @@ export class TelephonyService {
       const requiredService = r.lead?.primaryService || (r.intakeForm as any)?.primaryService || r.conversation?.primaryService || 'Doctor at Home';
       const subServices = r.lead?.subServices || (r.intakeForm as any)?.subServices || [];
       const source = isOutbound ? 'Outbound Call' : (r.lead?.source || (r.transferHistory as any)?.sourceChannel || 'Inbound Call');
-      const foundation = r.lead?.foundation || r.conversation?.foundation || 'Elder Care';
+      const foundation = r.lead?.foundation || r.conversation?.foundation || 'Care Services';
 
       return {
         id: r.id,
@@ -3770,13 +3770,13 @@ export class TelephonyService {
           auth: { user: emailUser, pass: emailPass },
         });
 
-        const subject = options?.subject || 'ElderCare Support Update';
+        const subject = options?.subject || 'CRM Tool Support Update';
         const info = await transporter.sendMail({
-          from: `"ElderCare CRM" <${emailUser}>`,
+          from: `"CRM Tool" <${emailUser}>`,
           to: recipient.trim(),
           subject,
           text: content,
-          html: `<div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;"><div style="background-color: #f97316; padding: 20px; text-align: center;"><h2 style="color: white; margin: 0;">ElderCare Support</h2></div><div style="padding: 20px;"><p style="white-space: pre-wrap;">${content}</p></div></div>`,
+          html: `<div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;"><div style="background-color: #f97316; padding: 20px; text-align: center;"><h2 style="color: white; margin: 0;">CRM Tool Support</h2></div><div style="padding: 20px;"><p style="white-space: pre-wrap;">${content}</p></div></div>`,
         });
 
         this.logger.log(`[Email Provider] Delivered via SMTP. Message ID: ${info.messageId}`);
@@ -3911,7 +3911,7 @@ export class TelephonyService {
           customerId: customer.id,
           channel: (channelUpper === 'WHATSAPP' ? 'WHATSAPP' : (channelUpper === 'INSTAGRAM' ? 'INSTAGRAM' : 'EMAIL')) as any,
           leadId: lead?.id || null,
-          foundation: lead?.foundation || 'Elder Care',
+          foundation: lead?.foundation || 'Care Services',
           primaryService: lead?.primaryService || 'General Care',
           status: 'OPEN',
           priority: (lead?.priority as any) || 'NORMAL',
@@ -4333,7 +4333,7 @@ export class TelephonyService {
         timestamp: c.updatedAt || c.createdAt,
         channel: c.channel,
         direction: 'INBOUND',
-        unit: c.foundation || 'Elder Care',
+        unit: c.foundation || 'Care Services',
         service: c.primaryService || null,
         lastMessage: c.messages?.[0]?.content || null,
       });

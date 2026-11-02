@@ -31,7 +31,7 @@ async function generateCallSummary(transcript) {
     }
 
     const prompt = `
-    Analyze the following customer service call transcript for an ElderCare CRM:
+    Analyze the following customer service call transcript for an Enterprise CRM:
     
     TRANSCRIPT:
     "${transcript}"
@@ -95,7 +95,7 @@ async function generateCallSummaryFromAudio(audioUrl, isOutbound) {
     const base64Audio = Buffer.from(arrayBuffer).toString('base64');
     
     const prompt = `
-    Analyze the following customer service call audio for an ElderCare CRM.
+    Analyze the following customer service call audio for an Enterprise CRM.
     The call is an ${isOutbound ? 'OUTBOUND' : 'INBOUND'} call.
     
     Please provide a JSON response with the following strictly formatted fields:

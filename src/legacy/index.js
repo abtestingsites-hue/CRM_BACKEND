@@ -504,14 +504,14 @@ app.post('/api/messages/send-email', requireAuth, async (req, res) => {
     const htmlBody = `
       <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">
         <div style="background-color: #2563eb; padding: 20px; text-align: center;">
-          <h2 style="color: white; margin: 0;">ElderCare Services CRM</h2>
+          <h2 style="color: white; margin: 0;">CRM Tool Services</h2>
         </div>
         <div style="padding: 20px;">
           <p style="white-space: pre-wrap;">${message}</p>
         </div>
         <div style="background-color: #f8fafc; padding: 15px; font-size: 12px; color: #64748b; text-align: center;">
           <p>Reply directly to this email to continue the conversation.</p>
-          <p>&copy; ${new Date().getFullYear()} ElderCare Support Team</p>
+          <p>&copy; ${new Date().getFullYear()} CRM Tool Support Team</p>
         </div>
       </div>
     `;
@@ -867,7 +867,7 @@ app.get('/test-send', requireAuth, requireRole(['SUPER_ADMIN']), async (req, res
     const twilioResponse = await twilioClient.messages.create({
       from: TWILIO_WHATSAPP_NUMBER,
       to: formattedTo,
-      body: "Test message from ElderCare CRM"
+      body: "Test message from CRM Tool"
     });
 
     res.json({ success: true, sid: twilioResponse.sid });
