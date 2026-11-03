@@ -27,6 +27,18 @@ export class UpdateEnquiryClassificationDto {
   patientAge?: number;
 
   @IsOptional()
+  @IsNumber()
+  patientWeight?: number;
+
+  @IsOptional()
+  @IsString()
+  patientWeightUnit?: string;
+
+  @IsOptional()
+  @IsString()
+  whatsappStatus?: string;
+
+  @IsOptional()
   @IsString()
   patientConditions?: string;
 
@@ -185,6 +197,18 @@ export class CreateLeadFromEnquiryDto {
   patientAge?: number;
 
   @IsOptional()
+  @IsNumber()
+  patientWeight?: number;
+
+  @IsOptional()
+  @IsString()
+  patientWeightUnit?: string;
+
+  @IsOptional()
+  @IsString()
+  whatsappStatus?: string;
+
+  @IsOptional()
   @IsString()
   patientConditions?: string;
 
@@ -313,6 +337,18 @@ export class SaveCallIntakeDto {
   @IsOptional()
   @IsNumber()
   patientAge?: number;
+
+  @IsOptional()
+  @IsNumber()
+  patientWeight?: number;
+
+  @IsOptional()
+  @IsString()
+  patientWeightUnit?: string;
+
+  @IsOptional()
+  @IsString()
+  whatsappStatus?: string;
 
   @IsOptional()
   @IsString()

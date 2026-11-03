@@ -134,6 +134,12 @@ export class EnquiryController {
     return await this.enquiryService.getCallDraft(callSidOrId);
   }
 
+  // 4e. Phone WhatsApp Registration Status
+  @Get('whatsapp-status/:phone')
+  async checkWhatsAppStatus(@Param('phone') phone: string) {
+    return await this.enquiryService.checkWhatsAppStatus(phone);
+  }
+
   // 5. Incremental Live Notes Auto-Save
   @Patch('live-notes/:targetType/:id')
   async saveLiveNotes(

@@ -244,6 +244,14 @@ model Customer {
   country          String?
   postalCode       String?
   
+  // Patient Details & WhatsApp Verification
+  patientName         String?
+  patientAge          Int?
+  patientWeight       Float?
+  patientWeightUnit   String?   @default("kg")
+  whatsappStatus      String?   @default("UNKNOWN")
+  whatsappVerifiedAt  DateTime?
+  
   // Omnichannel Identity fields
   platform            String?
   platformUserId      String?
@@ -722,6 +730,7 @@ model CallSession {
   draftNotes           Json?
   disposition          String?
   enquiryCategory      EnquiryCategory?
+  whatsappStatus       String?       @default("UNKNOWN")
 
   @@index([status])
   @@index([startedAt])
@@ -935,6 +944,8 @@ model Lead {
   subServices                 String[]           @default([])
   patientName                 String?
   patientAge                  Int?
+  patientWeight               Float?
+  patientWeightUnit           String?            @default("kg")
   patientConditions           String?
   patientMobility             String?
   engagementType              String?
@@ -949,6 +960,8 @@ model Lead {
   street                      String?
   state                       String?
   country                     String?
+  whatsappStatus              String?            @default("UNKNOWN")
+  whatsappVerifiedAt          DateTime?
   latitude                    Float?
   longitude                   Float?
   pickupLocation              String?

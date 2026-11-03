@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Priority, LeadPriority, EnquiryCategory } from '@prisma/client';
-import { INITIAL_FOUNDATIONS, CARE_CONFIG } from './enquiry-catalog.data';
+import { INITIAL_FOUNDATIONS, CARE_CONFIG, PRIMARY_ORGANIZATIONS } from './enquiry-catalog.data';
 import {
   UpdateEnquiryClassificationDto,
   CreateLeadFromEnquiryDto,
@@ -15,7 +15,7 @@ import {
 export class EnquiryService {
   private readonly logger = new Logger(EnquiryService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   // ==========================================
   // SERVICE CATALOG MANAGEMENT
@@ -29,8 +29,10 @@ export class EnquiryService {
       orderBy: [{ foundationKey: 'asc' }, { sortOrder: 'asc' }],
     });
 
-    if (items.length === 0) {
-      this.logger.log('Service catalog is empty. Auto-seeding initial catalog foundations...');
+    const hasUncf = items.some(i => i.foundationKey === 'UNCF');
+    const hasUecResidential = items.some(i => i.code === 'UEC_GERIATRIC_RESIDENTIAL_CARE');
+    if (items.length === 0 || !hasUncf || !hasUecResidential) {
+      this.logger.log('Updating service catalog foundations with UNCF and UEC replacement services...');
       await this.seedDefaultCatalog();
       items = await this.prisma.serviceCatalogItem.findMany({
         where: {
@@ -42,9 +44,15 @@ export class EnquiryService {
     }
 
     // Group items by foundation
-    const foundationsMap = new Map<string, { key: string; name: string; category: string; services: any[] }>();
+    const foundationsMap = new Map<string, { key: string; name: string; category: string; enquiryCategories?: any[]; services: any[] }>();
     for (const f of INITIAL_FOUNDATIONS) {
-      foundationsMap.set(f.key, { key: f.key, name: f.name, category: f.category, services: [] });
+      foundationsMap.set(f.key, {
+        key: f.key,
+        name: f.name,
+        category: f.category,
+        enquiryCategories: f.enquiryCategories || [],
+        services: [],
+      });
     }
 
     for (const item of items) {
@@ -53,20 +61,37 @@ export class EnquiryService {
           key: item.foundationKey,
           name: item.foundationName,
           category: item.category,
+          enquiryCategories: [],
           services: [],
         });
       }
-      foundationsMap.get(item.foundationKey)!.services.push(item);
+      foundationsMap.get(item.foundationKey)!.services.push({
+        ...item,
+        subcategory: (item.intakeFields as any)?.subcategory || item.category,
+      });
     }
 
     return {
+      organizations: PRIMARY_ORGANIZATIONS,
       foundations: Array.from(foundationsMap.values()),
-      items,
+      items: items.map(item => ({
+        ...item,
+        subcategory: (item.intakeFields as any)?.subcategory || item.category,
+      })),
       config: CARE_CONFIG,
     };
   }
 
   async seedDefaultCatalog() {
+    // 1. Deactivate old UEC_HOME_CARE in new options while preserving historical database records
+    await this.prisma.serviceCatalogItem.updateMany({
+      where: {
+        foundationKey: 'UEC',
+        code: 'UEC_HOME_CARE',
+      },
+      data: { isActive: false },
+    });
+
     for (const f of INITIAL_FOUNDATIONS) {
       let sort = 10;
       for (const s of f.services) {
@@ -86,8 +111,20 @@ export class EnquiryService {
               code: s.code,
               description: s.description || null,
               subServices: s.subServices || [],
+              intakeFields: { subcategory: s.subcategory || f.category },
               isEmergency: !!s.isEmergency,
               sortOrder: sort,
+              isActive: true,
+            },
+          });
+        } else {
+          await this.prisma.serviceCatalogItem.update({
+            where: { id: existing.id },
+            data: {
+              name: s.name,
+              description: s.description || existing.description,
+              subServices: s.subServices || existing.subServices,
+              intakeFields: { subcategory: s.subcategory || f.category },
               isActive: true,
             },
           });
@@ -481,10 +518,10 @@ export class EnquiryService {
     const leadPriority: LeadPriority = isAmbulance
       ? LeadPriority.EMERGENCY
       : dto.priority === Priority.EMERGENCY
-      ? LeadPriority.EMERGENCY
-      : dto.priority === Priority.HIGH
-      ? LeadPriority.HIGH
-      : LeadPriority.NORMAL;
+        ? LeadPriority.EMERGENCY
+        : dto.priority === Priority.HIGH
+          ? LeadPriority.HIGH
+          : LeadPriority.NORMAL;
 
     if (lead) {
       // Update existing lead
@@ -575,7 +612,7 @@ export class EnquiryService {
   private normalizePhone(raw?: string | null): string {
     if (!raw) return '';
     let clean = String(raw).trim();
-    try { clean = decodeURIComponent(clean); } catch (_) {}
+    try { clean = decodeURIComponent(clean); } catch (_) { }
     const lower = clean.toLowerCase();
     if (['unknown', 'anonymous', 'withheld', 'internal', 'private', 'none'].includes(lower)) {
       return '';
@@ -658,7 +695,8 @@ export class EnquiryService {
         unitId: resolvedUnit?.id,
         disposition: dto.callOutcome || undefined,
         enquiryCategory: (dto.enquiryCategory as any) || undefined,
-        ...(dto.liveNotes ? { liveNotes: { text: dto.liveNotes, updatedAt: new Date().toISOString() } } : {}),
+        whatsappStatus: dto.whatsappStatus || undefined,
+        ...(dto.liveNotes ? { liveNotes: { text: dto.liveNotes, updatedAt: new Date().toISOString(), agentId: user?.id || user?.userId, agentName: user?.name || user?.email } } : {}),
       },
     });
 
@@ -680,6 +718,12 @@ export class EnquiryService {
           ...(dto.state ? { state: dto.state } : {}),
           ...(dto.country ? { country: dto.country } : {}),
           ...(dto.postalCode ? { postalCode: dto.postalCode } : {}),
+          ...(dto.patientName ? { patientName: dto.patientName } : {}),
+          ...(dto.patientAge !== undefined ? { patientAge: dto.patientAge } : {}),
+          ...(dto.patientWeight !== undefined ? { patientWeight: dto.patientWeight } : {}),
+          ...(dto.patientWeightUnit ? { patientWeightUnit: dto.patientWeightUnit } : {}),
+          ...(dto.whatsappStatus ? { whatsappStatus: dto.whatsappStatus } : {}),
+          ...(dto.whatsappStatus === 'VERIFIED' ? { whatsappVerifiedAt: new Date() } : {}),
           profileEnriched: true,
         };
         const upsertedCustomer = await this.prisma.customer.upsert({
@@ -695,6 +739,12 @@ export class EnquiryService {
             state: dto.state || null,
             country: dto.country || null,
             postalCode: dto.postalCode || null,
+            patientName: dto.patientName || null,
+            patientAge: dto.patientAge ?? null,
+            patientWeight: dto.patientWeight ?? null,
+            patientWeightUnit: dto.patientWeightUnit || 'kg',
+            whatsappStatus: dto.whatsappStatus || 'UNKNOWN',
+            whatsappVerifiedAt: dto.whatsappStatus === 'VERIFIED' ? new Date() : null,
             profileEnriched: true,
           },
         });
@@ -714,10 +764,10 @@ export class EnquiryService {
     const resolvedLeadSource = (session as any).campaign
       ? `Campaign: ${(session as any).campaign}`
       : (session as any).source
-      ? (session as any).source
-      : (session as any).trackingNumber
-      ? `DID: ${(session as any).trackingNumber}`
-      : (callDirection === 'OUTBOUND' || (session.reason && session.reason.includes('outbound')) ? 'Outbound Call' : 'Inbound Call');
+        ? (session as any).source
+        : (session as any).trackingNumber
+          ? `DID: ${(session as any).trackingNumber}`
+          : (callDirection === 'OUTBOUND' || (session.reason && session.reason.includes('outbound')) ? 'Outbound Call' : 'Inbound Call');
 
     // Handle Job vs Service Enquiry routing
     const isJob = dto.enquiryCategory === 'JOB_ENQUIRY';
@@ -756,6 +806,8 @@ export class EnquiryService {
             subServices: dto.subServices || [],
             patientName: dto.patientName || null,
             patientAge: dto.patientAge ?? null,
+            patientWeight: dto.patientWeight ?? null,
+            patientWeightUnit: dto.patientWeightUnit || 'kg',
             patientConditions: dto.patientConditions || null,
             patientMobility: dto.patientMobility || null,
             engagementType: dto.engagementType || null,
@@ -771,6 +823,8 @@ export class EnquiryService {
             serviceAddress: fullAddress || dto.serviceAddress || null,
             cityDistrict: dto.city || dto.cityDistrict || null,
             postalCode: dto.postalCode || null,
+            whatsappStatus: dto.whatsappStatus || 'UNKNOWN',
+            whatsappVerifiedAt: dto.whatsappStatus === 'VERIFIED' ? new Date() : null,
             pickupLocation: dto.pickupLocation || null,
             destinationLocation: dto.destinationLocation || null,
             isAmbulanceEmergency: isAmbulance,
@@ -829,15 +883,25 @@ export class EnquiryService {
           ...(dto.subServices ? { subServices: dto.subServices } : {}),
           ...(dto.patientName ? { patientName: dto.patientName } : {}),
           ...(dto.patientAge !== undefined ? { patientAge: dto.patientAge } : {}),
+          ...(dto.patientWeight !== undefined ? { patientWeight: dto.patientWeight } : {}),
+          ...(dto.patientWeightUnit ? { patientWeightUnit: dto.patientWeightUnit } : {}),
           ...(dto.patientConditions ? { patientConditions: dto.patientConditions } : {}),
           ...(dto.patientMobility ? { patientMobility: dto.patientMobility } : {}),
           ...(dto.engagementType ? { engagementType: dto.engagementType } : {}),
           ...(dto.careDurationCategory ? { careDurationCategory: dto.careDurationCategory } : {}),
           ...(dto.careDuration ? { careDuration: dto.careDuration } : {}),
           ...(dto.careSchedule ? { careSchedule: dto.careSchedule } : {}),
-          ...(dto.serviceAddress ? { serviceAddress: dto.serviceAddress } : {}),
-          ...(dto.cityDistrict ? { cityDistrict: dto.cityDistrict } : {}),
+          ...(dto.secondaryPhone ? { secondaryPhone: dto.secondaryPhone } : {}),
+          ...(dto.secondaryCountryCode ? { secondaryCountryCode: dto.secondaryCountryCode } : {}),
+          ...(dto.street ? { street: dto.street } : {}),
+          ...(dto.city ? { city: dto.city } : {}),
+          ...(dto.state ? { state: dto.state } : {}),
+          ...(dto.country ? { country: dto.country } : {}),
+          ...(dto.serviceAddress || fullAddress ? { serviceAddress: fullAddress || dto.serviceAddress } : {}),
+          ...(dto.cityDistrict || dto.city ? { cityDistrict: dto.city || dto.cityDistrict } : {}),
           ...(dto.postalCode ? { postalCode: dto.postalCode } : {}),
+          ...(dto.whatsappStatus ? { whatsappStatus: dto.whatsappStatus } : {}),
+          ...(dto.whatsappStatus === 'VERIFIED' ? { whatsappVerifiedAt: new Date() } : {}),
           ...(dto.pickupLocation ? { pickupLocation: dto.pickupLocation } : {}),
           ...(dto.destinationLocation ? { destinationLocation: dto.destinationLocation } : {}),
           isAmbulanceEmergency: isAmbulance,
@@ -906,8 +970,8 @@ export class EnquiryService {
     const leadPriority: LeadPriority = isAmbulance
       ? LeadPriority.EMERGENCY
       : dto.callbackPriority === 'HIGH'
-      ? LeadPriority.HIGH
-      : LeadPriority.NORMAL;
+        ? LeadPriority.HIGH
+        : LeadPriority.NORMAL;
 
     const resolvedUnit = await this.resolveUnitForFoundationAndCategory(dto.foundation, dto.enquiryCategory as string, isAmbulance);
 
@@ -1156,8 +1220,8 @@ export class EnquiryService {
         dto.newPriority === Priority.EMERGENCY
           ? LeadPriority.EMERGENCY
           : dto.newPriority === Priority.HIGH
-          ? LeadPriority.HIGH
-          : LeadPriority.NORMAL;
+            ? LeadPriority.HIGH
+            : LeadPriority.NORMAL;
 
       await this.prisma.lead.update({
         where: { id: dto.leadId },
@@ -1228,11 +1292,125 @@ export class EnquiryService {
           };
         }
       }
-    } catch (_) {}
+    } catch (_) { }
 
     return {
       success: false,
       message: `No location match found for postal code ${cleanCode}. Please enter city and state manually.`,
+    };
+  }
+
+  // ==========================================
+  // WHATSAPP NUMBER REGISTRATION VERIFICATION (PHASE 26.1)
+  // ==========================================
+  async checkWhatsAppStatus(phoneNumber: string): Promise<{
+    phone: string;
+    normalizedPhone: string;
+    status: 'VERIFIED' | 'NOT_REGISTERED' | 'PENDING' | 'UNKNOWN';
+    provider?: string;
+    verifiedAt?: Date | null;
+    reason?: string;
+  }> {
+    const cleanPhone = this.normalizePhone(phoneNumber);
+    if (!cleanPhone || cleanPhone.length < 8) {
+      return {
+        phone: phoneNumber,
+        normalizedPhone: cleanPhone,
+        status: 'UNKNOWN',
+        reason: 'Invalid phone number format for WhatsApp check',
+      };
+    }
+
+    const metaToken = process.env.WHATSAPP_TOKEN;
+    const metaPhoneId = process.env.WHATSAPP_PHONE_ID;
+    const twilioSid = process.env.TWILIO_ACCOUNT_SID;
+    const twilioAuth = process.env.TWILIO_AUTH_TOKEN;
+
+    // 1. Check with Meta WhatsApp Cloud API Contacts verification if configured
+    if (metaToken && metaPhoneId) {
+      try {
+        const rawDigits = cleanPhone.replace(/[^0-9]/g, '');
+        const res = await fetch(`https://graph.facebook.com/v21.0/${metaPhoneId}/contacts`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${metaToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            blocking: 'wait',
+            contacts: [rawDigits],
+            force_check: true,
+          }),
+          signal: AbortSignal.timeout(4000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const contact = data.contacts?.[0];
+          if (contact?.status === 'valid') {
+            return {
+              phone: phoneNumber,
+              normalizedPhone: cleanPhone,
+              status: 'VERIFIED',
+              provider: 'META_WHATSAPP_CLOUD',
+              verifiedAt: new Date(),
+            };
+          } else if (contact?.status === 'invalid') {
+            return {
+              phone: phoneNumber,
+              normalizedPhone: cleanPhone,
+              status: 'NOT_REGISTERED',
+              provider: 'META_WHATSAPP_CLOUD',
+              verifiedAt: new Date(),
+            };
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`[WhatsApp Verification] Meta contacts API check failed: ${err.message}`);
+      }
+    }
+
+    // 2. Check Twilio Lookup v2 if configured
+    if (twilioSid && twilioAuth) {
+      try {
+        const authHeader = 'Basic ' + Buffer.from(`${twilioSid}:${twilioAuth}`).toString('base64');
+        const res = await fetch(`https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(cleanPhone)}?Fields=line_type_intelligence`, {
+          headers: { 'Authorization': authHeader },
+          signal: AbortSignal.timeout(4000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.valid === false) {
+            return {
+              phone: phoneNumber,
+              normalizedPhone: cleanPhone,
+              status: 'NOT_REGISTERED',
+              provider: 'TWILIO_LOOKUP',
+              verifiedAt: new Date(),
+            };
+          } else if (data.valid === true) {
+            // Number format is valid but WhatsApp existence requires provider confirmation
+            return {
+              phone: phoneNumber,
+              normalizedPhone: cleanPhone,
+              status: 'UNKNOWN',
+              provider: 'TWILIO_LOOKUP',
+              reason: 'Valid line but WhatsApp account existence requires Meta Cloud API confirmation',
+            };
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`[WhatsApp Verification] Twilio lookup failed: ${err.message}`);
+      }
+    }
+
+    // Default when no provider is configured or provider call fails:
+    // Strictly return UNKNOWN - never infer registration from number format alone
+    return {
+      phone: phoneNumber,
+      normalizedPhone: cleanPhone,
+      status: 'UNKNOWN',
+      reason: 'No authorized WhatsApp provider capability configured or provider unavailable',
+      verifiedAt: null,
     };
   }
 
@@ -1276,9 +1454,11 @@ export class EnquiryService {
     if (!session) {
       throw new NotFoundException('CallSession not found');
     }
+    const draftContent = session.draftNotes || session.intakeForm || null;
     return {
       success: true,
-      draft: session.draftNotes || session.intakeForm || null,
+      draft: draftContent,
+      draftData: draftContent,
       lead: session.lead,
       customer: session.customer,
     };

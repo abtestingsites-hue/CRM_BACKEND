@@ -171,7 +171,9 @@ export class TelephonyService {
         take: 5,
         include: {
           unit: { select: { id: true, code: true, name: true } },
-          department: { select: { id: true, name: true } }
+          department: { select: { id: true, name: true } },
+          caller: { select: { id: true, email: true, agentProfile: { select: { name: true } } } },
+          callee: { select: { id: true, email: true, agentProfile: { select: { name: true } } } },
         }
       });
 
@@ -305,6 +307,9 @@ export class TelephonyService {
           unit: c.unit?.name || null,
           department: c.department?.name || null,
           summary: (c.liveNotes as any)?.current || (c.liveNotes as any)?.text || (c.draftNotes as any)?.notes || null,
+          notes: (c.liveNotes as any)?.text || (c.draftNotes as any)?.notes || null,
+          intakeForm: c.intakeForm || null,
+          agentName: (c.caller as any)?.agentProfile?.name || (c.caller as any)?.email || (c.callee as any)?.agentProfile?.name || (c.liveNotes as any)?.agentName || null,
         })),
         lastContactDate,
         authorizedNotes,
