@@ -110,6 +110,30 @@ export class EnquiryController {
     return await this.enquiryService.saveStructuredEnquiryLead(dto, req.user, leadId);
   }
 
+  // 4c. Postal Code Location Lookup
+  @Get('postal-lookup/:postalCode')
+  async lookupPostalCode(
+    @Param('postalCode') postalCode: string,
+    @Query('country') country?: string,
+  ) {
+    return await this.enquiryService.lookupPostalCode(postalCode, country);
+  }
+
+  // 4d. Form Draft Persistence
+  @Patch('calls/:id/draft')
+  async saveCallDraft(
+    @Param('id') callSidOrId: string,
+    @Body() body: any,
+    @Req() req: any,
+  ) {
+    return await this.enquiryService.saveCallDraft(callSidOrId, body, req.user);
+  }
+
+  @Get('calls/:id/draft')
+  async getCallDraft(@Param('id') callSidOrId: string) {
+    return await this.enquiryService.getCallDraft(callSidOrId);
+  }
+
   // 5. Incremental Live Notes Auto-Save
   @Patch('live-notes/:targetType/:id')
   async saveLiveNotes(

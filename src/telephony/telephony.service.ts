@@ -1761,6 +1761,7 @@ export class TelephonyService {
               source: true,
               foundation: true,
               primaryService: true,
+              serviceInterest: true,
               subServices: true,
               isAmbulanceEmergency: true,
             }
@@ -1918,10 +1919,10 @@ export class TelephonyService {
         availableChannels.push({ channel: 'INSTAGRAM', label: 'Instagram', destination: instagram, isValid: true });
       }
 
-      const requiredService = r.lead?.primaryService || (r.intakeForm as any)?.primaryService || r.conversation?.primaryService || 'Doctor at Home';
+      const requiredService = r.lead?.primaryService || r.lead?.serviceInterest || (r.intakeForm as any)?.primaryService || (r.intakeForm as any)?.serviceCategory || r.conversation?.primaryService || null;
       const subServices = r.lead?.subServices || (r.intakeForm as any)?.subServices || [];
       const source = isOutbound ? 'Outbound Call' : (r.lead?.source || (r.transferHistory as any)?.sourceChannel || 'Inbound Call');
-      const foundation = r.lead?.foundation || r.conversation?.foundation || 'Care Services';
+      const foundation = r.lead?.foundation || (r.intakeForm as any)?.foundation || r.conversation?.foundation || null;
 
       return {
         id: r.id,
@@ -4603,7 +4604,6 @@ export class TelephonyService {
     },
     user?: any,
   ) {
-    if (!body.destUnitId) throw new BadRequestException('Destination business unit ID is required');
     if (!body.reason || !body.reason.trim()) throw new BadRequestException('Transfer reason is required');
 
     const lead = await this.prisma.lead.findUnique({
@@ -4612,12 +4612,21 @@ export class TelephonyService {
     });
     if (!lead) throw new NotFoundException('Lead not found');
 
-    const destUnit = await this.prisma.businessUnit.findUnique({
-      where: { id: body.destUnitId }
-    });
+    const targetUnitId = body.destUnitId || lead.unitId;
+    let destUnit = null;
+    if (targetUnitId) {
+      destUnit = await this.prisma.businessUnit.findUnique({
+        where: { id: targetUnitId }
+      });
+    }
+    if (!destUnit) {
+      destUnit = await this.prisma.businessUnit.findFirst();
+    }
     if (!destUnit) throw new NotFoundException('Destination unit not found');
 
-    const actorUserId = user?.id || user?.userId || user?.sub || null;
+    const rawActorId = user?.id || user?.userId || user?.sub || null;
+    const isActorUuid = rawActorId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawActorId);
+    const actorUserId = isActorUuid ? rawActorId : null;
 
     return await this.prisma.$transaction(async (tx) => {
       const updatedLead = await tx.lead.update({

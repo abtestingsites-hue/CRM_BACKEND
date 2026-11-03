@@ -237,6 +237,12 @@ model Customer {
   phone            String    @unique
   email            String?
   emergencyContact String?
+  secondaryPhone   String?
+  street           String?
+  city             String?
+  state            String?
+  country          String?
+  postalCode       String?
   
   // Omnichannel Identity fields
   platform            String?
@@ -938,6 +944,11 @@ model Lead {
   serviceAddress              String?
   cityDistrict                String?
   postalCode                  String?
+  secondaryPhone              String?
+  secondaryCountryCode        String?
+  street                      String?
+  state                       String?
+  country                     String?
   latitude                    Float?
   longitude                   Float?
   pickupLocation              String?

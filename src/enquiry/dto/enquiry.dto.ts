@@ -52,6 +52,30 @@ export class UpdateEnquiryClassificationDto {
 
   @IsOptional()
   @IsString()
+  secondaryPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  secondaryCountryCode?: string;
+
+  @IsOptional()
+  @IsString()
+  street?: string;
+
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @IsOptional()
+  @IsString()
+  state?: string;
+
+  @IsOptional()
+  @IsString()
+  country?: string;
+
+  @IsOptional()
+  @IsString()
   serviceAddress?: string;
 
   @IsOptional()
@@ -115,6 +139,18 @@ export class CreateLeadFromEnquiryDto {
   @IsOptional()
   @IsString()
   phone?: string;
+
+  @IsOptional()
+  @IsString()
+  countryCode?: string;
+
+  @IsOptional()
+  @IsString()
+  secondaryPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  secondaryCountryCode?: string;
 
   @IsOptional()
   @IsString()
@@ -217,6 +253,34 @@ export class SaveCallIntakeDto {
   @IsOptional()
   @IsString()
   phone?: string;
+
+  @IsOptional()
+  @IsString()
+  countryCode?: string;
+
+  @IsOptional()
+  @IsString()
+  secondaryPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  secondaryCountryCode?: string;
+
+  @IsOptional()
+  @IsString()
+  street?: string;
+
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @IsOptional()
+  @IsString()
+  state?: string;
+
+  @IsOptional()
+  @IsString()
+  country?: string;
 
   @IsOptional()
   @IsString()

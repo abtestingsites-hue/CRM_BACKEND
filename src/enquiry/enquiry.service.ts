@@ -428,6 +428,12 @@ export class EnquiryService {
           ...(dto.careDurationCategory ? { careDurationCategory: dto.careDurationCategory } : {}),
           ...(dto.careDuration ? { careDuration: dto.careDuration } : {}),
           ...(dto.careSchedule ? { careSchedule: dto.careSchedule } : {}),
+          ...(dto.secondaryPhone ? { secondaryPhone: dto.secondaryPhone } : {}),
+          ...(dto.secondaryCountryCode ? { secondaryCountryCode: dto.secondaryCountryCode } : {}),
+          ...(dto.street ? { street: dto.street } : {}),
+          ...(dto.city ? { city: dto.city } : {}),
+          ...(dto.state ? { state: dto.state } : {}),
+          ...(dto.country ? { country: dto.country } : {}),
           ...(dto.serviceAddress ? { serviceAddress: dto.serviceAddress } : {}),
           ...(dto.cityDistrict ? { cityDistrict: dto.cityDistrict } : {}),
           ...(dto.postalCode ? { postalCode: dto.postalCode } : {}),
@@ -598,15 +604,25 @@ export class EnquiryService {
     });
   }
 
+  private getCallSessionLookupFilter(callSidOrId: string) {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callSidOrId);
+    const orConditions: any[] = [
+      { reason: callSidOrId },
+      { livekitRoom: callSidOrId },
+      { providerCallId: callSidOrId },
+    ];
+    if (isUuid) {
+      orConditions.push({ id: callSidOrId });
+    }
+    return orConditions;
+  }
+
   async saveCallIntake(callSidOrId: string, dto: SaveCallIntakeDto, user: any) {
-    // Locate call session by ID or reason (Vobiz provider callSid)
+    const fullAddress = [dto.street, dto.city, dto.state, dto.postalCode, dto.country].filter(Boolean).join(', ');
+    // Locate call session by ID or reason or providerCallId
     const session = await this.prisma.callSession.findFirst({
       where: {
-        OR: [
-          { id: callSidOrId },
-          { reason: callSidOrId },
-          { livekitRoom: callSidOrId },
-        ],
+        OR: this.getCallSessionLookupFilter(callSidOrId),
       },
       include: { lead: true, customer: true },
     });
@@ -651,19 +667,30 @@ export class EnquiryService {
     if (cleanPhone) {
       try {
         const custName = dto.enquirerName || (dto.patientName ? `${dto.patientName} (Contact: ${dto.enquirerName || 'Caller'})` : undefined);
+        const custData: any = {
+          ...(custName ? { name: custName } : {}),
+          ...(dto.email ? { email: dto.email } : {}),
+          ...(dto.secondaryPhone ? { secondaryPhone: dto.secondaryPhone } : {}),
+          ...(dto.street ? { street: dto.street } : {}),
+          ...(dto.city ? { city: dto.city } : {}),
+          ...(dto.state ? { state: dto.state } : {}),
+          ...(dto.country ? { country: dto.country } : {}),
+          ...(dto.postalCode ? { postalCode: dto.postalCode } : {}),
+          profileEnriched: true,
+        };
         const upsertedCustomer = await this.prisma.customer.upsert({
           where: { phone: cleanPhone },
-          update: {
-            ...(custName ? { name: custName } : {}),
-            ...(dto.email ? { email: dto.email } : {}),
-            ...(dto.serviceAddress ? { address: dto.serviceAddress } : {}),
-            profileEnriched: true,
-          },
+          update: custData,
           create: {
             name: custName || 'Inbound Enquirer',
             phone: cleanPhone,
             email: dto.email || null,
-            address: dto.serviceAddress || null,
+            secondaryPhone: dto.secondaryPhone || null,
+            street: dto.street || null,
+            city: dto.city || null,
+            state: dto.state || null,
+            country: dto.country || null,
+            postalCode: dto.postalCode || null,
             profileEnriched: true,
           },
         });
@@ -731,8 +758,14 @@ export class EnquiryService {
             careDurationCategory: dto.careDurationCategory || null,
             careDuration: dto.careDuration || null,
             careSchedule: dto.careSchedule || null,
-            serviceAddress: dto.serviceAddress || null,
-            cityDistrict: dto.cityDistrict || null,
+            secondaryPhone: dto.secondaryPhone || null,
+            secondaryCountryCode: dto.secondaryCountryCode || null,
+            street: dto.street || null,
+            city: dto.city || dto.cityDistrict || null,
+            state: dto.state || null,
+            country: dto.country || null,
+            serviceAddress: fullAddress || dto.serviceAddress || null,
+            cityDistrict: dto.city || dto.cityDistrict || null,
             postalCode: dto.postalCode || null,
             pickupLocation: dto.pickupLocation || null,
             destinationLocation: dto.destinationLocation || null,
@@ -1002,7 +1035,7 @@ export class EnquiryService {
     if (targetType === 'call') {
       const session = await this.prisma.callSession.findFirst({
         where: {
-          OR: [{ id }, { reason: id }, { livekitRoom: id }],
+          OR: this.getCallSessionLookupFilter(id),
         },
       });
       if (!session) throw new NotFoundException('CallSession not found');
@@ -1125,5 +1158,117 @@ export class EnquiryService {
     }
 
     return { success: true, audit };
+  }
+
+  // ==========================================
+  // POSTAL CODE LOOKUP & DRAFT PERSISTENCE (PHASE 26)
+  // ==========================================
+  async lookupPostalCode(postalCode: string, country: string = 'IN') {
+    if (!postalCode || postalCode.trim().length < 3) {
+      return { success: false, message: 'Please enter a valid postal code' };
+    }
+    const cleanCode = postalCode.trim();
+    const cleanCountry = (country || 'IN').toUpperCase();
+
+    // 1. India Pincode lookup via India Post API
+    if (cleanCountry === 'IN' || /^\d{6}$/.test(cleanCode)) {
+      try {
+        const response = await fetch(`https://api.postalpincode.in/pincode/${cleanCode}`, {
+          signal: AbortSignal.timeout(4000),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (Array.isArray(data) && data[0]?.Status === 'Success' && data[0]?.PostOffice?.length > 0) {
+            const po = data[0].PostOffice[0];
+            return {
+              success: true,
+              postalCode: cleanCode,
+              city: po.District || po.Division || po.Block || po.Name,
+              state: po.State,
+              country: 'India',
+              countryCode: 'IN',
+              postOffices: data[0].PostOffice.map((p: any) => p.Name),
+            };
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`Postal lookup error for ${cleanCode}: ${err.message}`);
+      }
+    }
+
+    // 2. International lookup via Zippopotam
+    try {
+      const zippoCountry = cleanCountry.toLowerCase();
+      const zippoRes = await fetch(`https://api.zippopotam.us/${zippoCountry}/${cleanCode}`, {
+        signal: AbortSignal.timeout(3500),
+      });
+      if (zippoRes.ok) {
+        const zData = await zippoRes.json();
+        const place = zData.places?.[0];
+        if (place) {
+          return {
+            success: true,
+            postalCode: cleanCode,
+            city: place['place name'],
+            state: place['state'] || place['state abbreviation'],
+            country: zData.country || cleanCountry,
+            countryCode: cleanCountry,
+          };
+        }
+      }
+    } catch (_) {}
+
+    return {
+      success: false,
+      message: `No location match found for postal code ${cleanCode}. Please enter city and state manually.`,
+    };
+  }
+
+  async saveCallDraft(callSidOrId: string, draftData: any, user?: any) {
+    const session = await this.prisma.callSession.findFirst({
+      where: {
+        OR: this.getCallSessionLookupFilter(callSidOrId),
+      },
+    });
+    if (!session) {
+      throw new NotFoundException('CallSession not found');
+    }
+    const timestamp = new Date().toISOString();
+    const draftPayload = {
+      ...draftData,
+      updatedAt: timestamp,
+      savedBy: user?.name || user?.email || 'Agent',
+      authorId: user?.id || user?.userId,
+    };
+    await this.prisma.callSession.update({
+      where: { id: session.id },
+      data: { draftNotes: draftPayload },
+    });
+    return { success: true, savedAt: timestamp, draft: draftPayload };
+  }
+
+  async getCallDraft(callSidOrId: string) {
+    const session = await this.prisma.callSession.findFirst({
+      where: {
+        OR: this.getCallSessionLookupFilter(callSidOrId),
+      },
+      select: {
+        id: true,
+        draftNotes: true,
+        intakeForm: true,
+        leadId: true,
+        lead: true,
+        customer: true,
+      },
+    });
+    if (!session) {
+      throw new NotFoundException('CallSession not found');
+    }
+    return {
+      success: true,
+      draft: session.draftNotes || session.intakeForm || null,
+      lead: session.lead,
+      customer: session.customer,
+    };
   }
 }
