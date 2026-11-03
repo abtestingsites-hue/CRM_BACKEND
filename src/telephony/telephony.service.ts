@@ -270,11 +270,30 @@ export class TelephonyService {
       const matchingLead = leads[0] || null;
       const authorizedNotes = matchingLead?.notes || matchingCustomer?.notes?.[0]?.content || null;
 
+      const primaryMatch = matches[0] || null;
+      const callerName = (matchingCustomer?.name && matchingCustomer.name !== 'Unverified Contact' && matchingCustomer.name !== 'Inbound Caller')
+        ? matchingCustomer.name
+        : (matchingLead?.customerName || primaryMatch?.name || null);
+
+      const callerUnit = primaryMatch?.unit?.code || primaryMatch?.unit?.name || (matchingLead?.unit as any)?.code || (matchingLead?.unit as any)?.name || 'UEC';
+      const callerDept = primaryMatch?.department || matchingLead?.assignedAgent?.department || 'Care Coordination';
+      const openLeadStatus = matchingLead?.status || (matchingLead ? 'Active Lead' : 'None');
+      const previousCallsCount = callSessions.length;
+
       return {
         matchStatus,
         message,
+        name: callerName,
+        phone: e164 || phoneNumber,
+        businessUnit: callerUnit,
+        department: callerDept,
+        openLeadStatus,
+        previousCallsCount,
+        notes: authorizedNotes,
         matchingCustomer,
         matchingLead,
+        matchingLeadId: matchingLead?.id || null,
+        matchingCustomerId: matchingCustomer?.id || null,
         matches,
         relevantCalls: callSessions.map(c => ({
           id: c.id,
@@ -3038,6 +3057,39 @@ export class TelephonyService {
         event.toNumber?.includes('108') ||
         event.campaign?.toLowerCase().includes('emergency')
       );
+
+      // Section F: First-Call Lead Persistence for inbound callers with no existing lead
+      if (!resolvedLeadId && phoneNorm.e164) {
+        try {
+          const defaultSource = event.campaign
+            ? `Campaign: ${event.campaign}`
+            : event.source
+            ? event.source
+            : event.trackingNumber
+            ? `DID: ${event.trackingNumber}`
+            : 'Inbound Call';
+
+          const newLead = await this.prisma.lead.create({
+            data: {
+              customerName: (crossUnitLookup.matchingCustomer?.name && crossUnitLookup.matchingCustomer.name !== 'Unverified Contact')
+                ? crossUnitLookup.matchingCustomer.name
+                : 'Inbound Caller',
+              phoneNumber: phoneNorm.e164,
+              source: defaultSource,
+              status: 'NEW',
+              priority: isEmergency ? 'EMERGENCY' : 'NORMAL',
+              foundation: 'UEC',
+              enquiryCategory: 'SERVICE_ENQUIRY',
+            },
+          });
+          resolvedLeadId = newLead.id;
+          crossUnitLookup.matchingLead = newLead as any;
+          customerContext.lead = newLead as any;
+          this.logger.log(`[INBOUND-FIRST-CALL] Created first-call lead=${newLead.id} for phone=${phoneNorm.e164} source=${defaultSource}`);
+        } catch (leadErr: any) {
+          this.logger.warn(`[INBOUND-FIRST-CALL] Could not create first-call lead for ${phoneNorm.e164}: ${leadErr.message}`);
+        }
+      }
 
       // Prepare Phase 25 Source Attribution Metadata
       const extraMeta = {

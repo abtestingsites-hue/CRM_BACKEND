@@ -647,6 +647,53 @@ export class EnquiryService {
     const cleanPhone = this.normalizePhone(dto.phone || session.customer?.phone);
     let existingLead: any = null;
 
+    // Customer Persistence from call intake form
+    if (cleanPhone) {
+      try {
+        const custName = dto.enquirerName || (dto.patientName ? `${dto.patientName} (Contact: ${dto.enquirerName || 'Caller'})` : undefined);
+        const upsertedCustomer = await this.prisma.customer.upsert({
+          where: { phone: cleanPhone },
+          update: {
+            ...(custName ? { name: custName } : {}),
+            ...(dto.email ? { email: dto.email } : {}),
+            ...(dto.serviceAddress ? { address: dto.serviceAddress } : {}),
+            profileEnriched: true,
+          },
+          create: {
+            name: custName || 'Inbound Enquirer',
+            phone: cleanPhone,
+            email: dto.email || null,
+            address: dto.serviceAddress || null,
+            profileEnriched: true,
+          },
+        });
+        if (!session.customerId) {
+          await this.prisma.callSession.update({
+            where: { id: session.id },
+            data: { customerId: upsertedCustomer.id },
+          });
+        }
+      } catch (custErr: any) {
+        this.logger.warn(`Failed to upsert customer on saveCallIntake: ${custErr.message}`);
+      }
+    }
+
+    // Determine correct lead source from call session attribution
+    const callDirection = (session as any).direction;
+    const resolvedLeadSource = (session as any).campaign
+      ? `Campaign: ${(session as any).campaign}`
+      : (session as any).source
+      ? (session as any).source
+      : (session as any).trackingNumber
+      ? `DID: ${(session as any).trackingNumber}`
+      : (callDirection === 'OUTBOUND' || (session.reason && session.reason.includes('outbound')) ? 'Outbound Call' : 'Inbound Call');
+
+    // Handle Job vs Service Enquiry routing
+    const isJob = dto.enquiryCategory === 'JOB_ENQUIRY';
+    const resolvedServiceInterest = isJob
+      ? (dto.primaryService ? `Job Enquiry: ${dto.primaryService}` : (dto.serviceCategory || 'Job Enquiry / Careers'))
+      : (dto.primaryService || dto.serviceCategory || 'Care Services');
+
     if (targetLeadId) {
       existingLead = await this.prisma.lead.findUnique({ where: { id: targetLeadId } });
     }
@@ -667,8 +714,8 @@ export class EnquiryService {
             customerName: dto.enquirerName || session.customer?.name || 'Inbound Enquirer',
             phoneNumber: cleanPhone,
             email: dto.email || session.customer?.email || null,
-            serviceInterest: dto.primaryService || dto.serviceCategory || 'Care Services',
-            source: (session as any).direction === 'OUTBOUND' || (session.reason && session.reason.includes('outbound')) ? 'Outbound Call' : (session.source || 'Inbound Call'),
+            serviceInterest: resolvedServiceInterest,
+            source: resolvedLeadSource,
             status: 'NEW',
             priority: isAmbulance ? LeadPriority.EMERGENCY : LeadPriority.NORMAL,
             foundation: dto.foundation || 'UEC',
@@ -733,7 +780,9 @@ export class EnquiryService {
           ...(dto.enquirerName ? { customerName: dto.enquirerName } : {}),
           ...(dto.email ? { email: dto.email } : {}),
           ...(dto.foundation ? { foundation: dto.foundation } : {}),
-          ...(dto.serviceCategory ? { serviceInterest: dto.serviceCategory } : {}),
+          serviceInterest: resolvedServiceInterest,
+          ...(resolvedUnit?.id ? { unitId: resolvedUnit.id } : {}),
+          ...((!existingLead?.source || existingLead?.source === 'Manual Entry' || existingLead?.source === 'Unknown') ? { source: resolvedLeadSource } : {}),
           ...(dto.enquiryCategory ? { enquiryCategory: dto.enquiryCategory } : {}),
           ...(dto.primaryService ? { primaryService: dto.primaryService } : {}),
           ...(dto.subServices ? { subServices: dto.subServices } : {}),
