@@ -657,7 +657,7 @@ export class TelephonyService {
       if (!session) return null;
 
       const th = session.transferHistory as any;
-      const callerPhone = session.customer?.phone || session.lead?.phoneNumber || th?.phone;
+      const callerPhone = session.callerNumber || session.customer?.phone || session.lead?.phoneNumber || th?.phone;
       const direction = th?.direction || 'inbound';
 
       // If inbound call, ensure the actual LiveKit SIP room where the caller joined is synchronized
@@ -781,7 +781,15 @@ export class TelephonyService {
         },
       });
 
-      return session;
+      const freshSession = await this.prisma.callSession.findUnique({
+        where: { id: session.id },
+        include: {
+          transferAudits: { orderBy: { createdAt: 'desc' }, take: 1 },
+          customer: true,
+          lead: true,
+        },
+      });
+      return freshSession || session;
     } catch (e) {
       this.logger.error(`Failed to accept CallSession: ${e.message}`);
       return null;
@@ -1032,12 +1040,43 @@ export class TelephonyService {
         return;
       }
 
+      // Resolve the actual room to record: prefer real SIP room (starts with call- or contains _+)
+      let actualRoomName = roomName;
+      if (callSession.livekitRoom && (callSession.livekitRoom.startsWith('call-') || callSession.livekitRoom.includes('_+'))) {
+        actualRoomName = callSession.livekitRoom;
+      } else if (roomName && (roomName.startsWith('call-') || roomName.includes('_+'))) {
+        actualRoomName = roomName;
+      } else if (callSession.livekitRoom) {
+        actualRoomName = callSession.livekitRoom;
+      }
+
+      // If still synthetic room (e.g. call_UUID), check if SIP room can be discovered
+      if (actualRoomName.startsWith('call_') && !actualRoomName.includes('_+')) {
+        const callerPhone = callSession.callerNumber || callSession.customer?.phone || callSession.lead?.phoneNumber || (callSession.transferHistory as any)?.phone;
+        if (callerPhone) {
+          try {
+            const sipInfo = await this.livekitService.findInboundSipRoom(callerPhone, 4, 300);
+            if (sipInfo?.roomName) {
+              this.logger.log(`[CALL-RECORDING] Discovered real SIP room ${sipInfo.roomName} for recording callSid=${callSid}`);
+              actualRoomName = sipInfo.roomName;
+              await this.prisma.callSession.update({
+                where: { id: callSession.id },
+                data: {
+                  livekitRoom: sipInfo.roomName,
+                  livekitSipParticipantIdentity: sipInfo.participantIdentity,
+                }
+              });
+            }
+          } catch (_) {}
+        }
+      }
+
       // Check participants with polling retry so we don't abort if the 2nd participant is still joining
-      let participants = await this.livekitService.getRoomParticipants(roomName);
-      this.logger.log(`[CALL-RECORDING] event=ROOM_PARTICIPANTS callId=${callSid} roomName=${roomName} participantCount=${participants.length} participants=${participants.map(p => p.identity).join(',')}`);
+      let participants = await this.livekitService.getRoomParticipants(actualRoomName);
+      this.logger.log(`[CALL-RECORDING] event=ROOM_PARTICIPANTS callId=${callSid} roomName=${actualRoomName} participantCount=${participants.length} participants=${participants.map(p => p.identity).join(',')}`);
 
       if (participants.length < 2) {
-        this.logger.log(`[CALL-RECORDING] Room has < 2 participants. Polling up to 15s for 2nd participant...`);
+        this.logger.log(`[CALL-RECORDING] Room ${actualRoomName} has < 2 participants. Polling up to 15s for 2nd participant...`);
         for (let i = 0; i < 10; i++) {
           await new Promise(r => setTimeout(r, 1500));
           const current = await this.prisma.callSession.findUnique({ where: { id: callSession.id } });
@@ -1045,13 +1084,16 @@ export class TelephonyService {
             this.logger.log(`[CALL-RECORDING] Call ended while waiting for participants. Aborting recording start.`);
             return;
           }
-          participants = await this.livekitService.getRoomParticipants(roomName);
+          if (current.livekitRoom && current.livekitRoom !== actualRoomName && (current.livekitRoom.startsWith('call-') || current.livekitRoom.includes('_+'))) {
+            actualRoomName = current.livekitRoom;
+          }
+          participants = await this.livekitService.getRoomParticipants(actualRoomName);
           if (participants.length >= 2) break;
         }
       }
 
       if (participants.length < 2) {
-        this.logger.warn(`[CALL-RECORDING] Timed out waiting for 2nd participant in room ${roomName}. Allowing retry when participant connects.`);
+        this.logger.warn(`[CALL-RECORDING] Timed out waiting for 2nd participant in room ${actualRoomName}. Allowing retry when participant connects.`);
         return;
       }
 
@@ -1061,22 +1103,23 @@ export class TelephonyService {
       this.recordingRetryAttempts.set(lookupKey, currentAttempts + 1);
       if (callSid) this.recordingRetryAttempts.set(callSid, currentAttempts + 1);
 
-      this.logger.log(`[CALL-RECORDING] event=EGRESS_STARTING callId=${callSid} roomName=${roomName} attempt=${currentAttempts + 1}`);
-      const egressId = await this.livekitService.startRoomRecording(roomName);
+      this.logger.log(`[CALL-RECORDING] event=EGRESS_STARTING callId=${callSid} roomName=${actualRoomName} attempt=${currentAttempts + 1}`);
+      const egressId = await this.livekitService.startRoomRecording(actualRoomName);
 
       if (!egressId || typeof egressId !== 'string' || !egressId.trim()) {
-        throw new Error(`LiveKit Egress returned empty egressId for room ${roomName}`);
+        throw new Error(`LiveKit Egress returned empty egressId for room ${actualRoomName}`);
       }
 
       await this.prisma.callSession.update({
         where: { id: callSession.id },
         data: {
           recordingStatus: 'RECORDING',
+          livekitRoom: actualRoomName,
           livekitEgressId: egressId,
           recordingStartedAt: new Date()
         }
       });
-      this.logger.log(`[CALL-RECORDING] event=EGRESS_STARTED callId=${callSid} roomName=${roomName} egressId=${egressId}`);
+      this.logger.log(`[CALL-RECORDING] event=EGRESS_STARTED callId=${callSid} roomName=${actualRoomName} egressId=${egressId}`);
       this.logger.log(`[CALL-LIFECYCLE-DIAG] callId=${callSession?.reason || callSid} stage=RECORDING_STARTED source=startLivekitRecording timestamp=${new Date().toISOString()} egressId=${egressId}`);
     } catch (e: any) {
       const errMsg = e.message || String(e);
@@ -1240,9 +1283,11 @@ export class TelephonyService {
 
       // Automatically finalize any temporary QueueItem resources associated with this call
       const queueOutcome = ['MISSED', 'CANCELLED', 'REJECTED', 'UNANSWERED', 'FAILED', 'BUSY'].includes(finalStatus) ? 'ABANDONED' : 'COMPLETED';
-      await this.queueService.finalizeQueueItem(session.reason || callSid, queueOutcome).catch(() => {});
-      if (session.id && session.id !== callSid && session.id !== session.reason) {
-        await this.queueService.finalizeQueueItem(session.id, queueOutcome).catch(() => {});
+      if (this.queueService && typeof this.queueService.finalizeQueueItem === 'function') {
+        await this.queueService.finalizeQueueItem(session.reason || callSid, queueOutcome).catch(() => {});
+        if (session.id && session.id !== callSid && session.id !== session.reason) {
+          await this.queueService.finalizeQueueItem(session.id, queueOutcome).catch(() => {});
+        }
       }
 
       const carrierRecordingData: any = {};

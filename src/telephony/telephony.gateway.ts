@@ -588,26 +588,32 @@ export class TelephonyGateway
     }
 
     const session = await this.telephonyService.acceptCallSession(data.callSid, agentId);
-    if (session && session.livekitRoom) {
-      try {
-        const agentRecord = await this.prisma.agent.findFirst({
-          where: { OR: [{ id: agentId }, { userId: agentId }] }
-        });
-        const livekitWsUrl = process.env.LIVEKIT_WS_URL || process.env.LIVEKIT_API_URL;
-        const freshToken = await this.livekitService.generateAgentToken(
-          session.livekitRoom,
-          agentRecord?.name || 'Agent',
-        );
-        client.emit('callAcceptedConfirmed', {
-          callSid: data.callSid,
-          roomName: session.livekitRoom,
-          token: freshToken,
-          serverUrl: livekitWsUrl,
-          wsUrl: livekitWsUrl,
-        });
-        this.logger.log(`[ACCEPT-SYNC] Emitted callAcceptedConfirmed to socket ${client.id} for room ${session.livekitRoom}`);
-      } catch (e: any) {
-        this.logger.warn(`[ACCEPT-SYNC] Failed to emit callAcceptedConfirmed: ${e.message}`);
+    if (session) {
+      let roomToUse = session.livekitRoom;
+      if (data.roomName && (data.roomName.startsWith('call-') || data.roomName.includes('_+'))) {
+        roomToUse = data.roomName;
+      }
+      if (roomToUse) {
+        try {
+          const agentRecord = await this.prisma.agent.findFirst({
+            where: { OR: [{ id: agentId }, { userId: agentId }] }
+          });
+          const livekitWsUrl = process.env.LIVEKIT_WS_URL || process.env.LIVEKIT_API_URL;
+          const freshToken = await this.livekitService.generateAgentToken(
+            roomToUse,
+            agentRecord?.name || 'Agent',
+          );
+          client.emit('callAcceptedConfirmed', {
+            callSid: data.callSid,
+            roomName: roomToUse,
+            token: freshToken,
+            serverUrl: livekitWsUrl,
+            wsUrl: livekitWsUrl,
+          });
+          this.logger.log(`[ACCEPT-SYNC] Emitted callAcceptedConfirmed to socket ${client.id} for room ${roomToUse}`);
+        } catch (e: any) {
+          this.logger.warn(`[ACCEPT-SYNC] Failed to emit callAcceptedConfirmed: ${e.message}`);
+        }
       }
     }
   }
@@ -654,7 +660,9 @@ export class TelephonyGateway
       });
 
       // Start recording on answer if roomName provided (deduplicated in TelephonyService)
-      const roomToRecord = session.livekitRoom || data.roomName;
+      const roomToRecord = (session.livekitRoom && (session.livekitRoom.startsWith('call-') || session.livekitRoom.includes('_+')))
+        ? session.livekitRoom
+        : (data.roomName || session.livekitRoom);
       if (roomToRecord) {
         await this.telephonyService.startLivekitRecording(session.reason || data.callSid, roomToRecord).catch((err: any) => {
           this.logger.warn(`Failed to auto-start recording on answer: ${err.message}`);
