@@ -661,14 +661,28 @@ export class EnquiryService {
   async saveCallIntake(callSidOrId: string, dto: SaveCallIntakeDto, user: any) {
     const fullAddress = [dto.street, dto.city, dto.state, dto.postalCode, dto.country].filter(Boolean).join(', ');
     // Locate call session by ID or reason or providerCallId
-    const session = await this.prisma.callSession.findFirst({
+    let session = await this.prisma.callSession.findFirst({
       where: {
         OR: this.getCallSessionLookupFilter(callSidOrId),
       },
       include: { lead: true, customer: true },
     });
 
-    if (!session) throw new NotFoundException('CallSession not found');
+    if (!session) {
+      this.logger.log(`CallSession [${callSidOrId}] not found during saveCallIntake. Auto-provisioning session.`);
+      const rawUserId = user?.id || user?.userId;
+      const validUserId = this.isValidUuid(rawUserId) ? rawUserId : undefined;
+      session = await this.prisma.callSession.create({
+        data: {
+          reason: callSidOrId,
+          providerCallId: callSidOrId,
+          livekitRoom: callSidOrId,
+          status: 'ENDED',
+          callerUserId: validUserId,
+        },
+        include: { lead: true, customer: true },
+      });
+    }
 
     const isAmbulance =
       dto.foundation === 'AMBULANCE' ||
@@ -676,6 +690,12 @@ export class EnquiryService {
       dto.subServices?.some(s => s.toLowerCase().includes('ambulance'));
 
     const resolvedUnit = await this.resolveUnitForFoundationAndCategory(dto.foundation, dto.enquiryCategory as string, isAmbulance);
+
+    // Sanitize enquiryCategory to ensure only valid Prisma enum values are stored in database enum columns
+    const validEnquiryCategories = ['SERVICE_ENQUIRY', 'JOB_ENQUIRY'];
+    const safeEnquiryCategory = validEnquiryCategories.includes(dto.enquiryCategory as string)
+      ? (dto.enquiryCategory as any)
+      : (dto.enquiryCategory ? 'SERVICE_ENQUIRY' : undefined);
 
     const intakePayload = {
       ...dto,
@@ -694,7 +714,7 @@ export class EnquiryService {
         intakeForm: intakePayload,
         unitId: resolvedUnit?.id,
         disposition: dto.callOutcome || undefined,
-        enquiryCategory: (dto.enquiryCategory as any) || undefined,
+        enquiryCategory: safeEnquiryCategory,
         whatsappStatus: dto.whatsappStatus || undefined,
         ...(dto.liveNotes ? { liveNotes: { text: dto.liveNotes, updatedAt: new Date().toISOString(), agentId: user?.id || user?.userId, agentName: user?.name || user?.email } } : {}),
       },
@@ -801,7 +821,7 @@ export class EnquiryService {
             priority: isAmbulance ? LeadPriority.EMERGENCY : LeadPriority.NORMAL,
             foundation: dto.foundation || 'UEC',
             unitId: resolvedUnit?.id,
-            enquiryCategory: dto.enquiryCategory as any,
+            enquiryCategory: safeEnquiryCategory,
             primaryService: dto.primaryService || null,
             subServices: dto.subServices || [],
             patientName: dto.patientName || null,
@@ -844,27 +864,31 @@ export class EnquiryService {
 
     // Check if unit reclassification occurred and audit it
     if (existingLead && resolvedUnit && existingLead.unitId && existingLead.unitId !== resolvedUnit.id && targetLeadId) {
-      const actorUserId = this.isValidUuid(user?.id) ? user.id : this.isValidUuid(user?.userId) ? user.userId : undefined;
-      const assignedAgentId = this.isValidUuid(user?.agentId) ? user.agentId : undefined;
-      await this.prisma.leadTransferAudit.create({
-        data: {
-          leadId: targetLeadId,
-          sourceUnitId: existingLead.unitId,
-          destUnitId: resolvedUnit.id,
-          transferredById: actorUserId,
-          assignedAgentId: assignedAgentId,
-          reason: `Reclassified during call intake: ${dto.enquiryCategory || dto.primaryService || 'Intent change'}`,
-          status: 'COMPLETED',
-          preserveHistory: true,
-          metadata: {
-            previousFoundation: existingLead.foundation,
-            newFoundation: dto.foundation,
-            callSid: session.reason || session.id,
-            actorEmail: user?.email,
-            actorUsername: user?.username || user?.name,
+      try {
+        const actorUserId = this.isValidUuid(user?.id) ? user.id : this.isValidUuid(user?.userId) ? user.userId : undefined;
+        const assignedAgentId = this.isValidUuid(user?.agentId) ? user.agentId : undefined;
+        await this.prisma.leadTransferAudit.create({
+          data: {
+            leadId: targetLeadId,
+            sourceUnitId: existingLead.unitId,
+            destUnitId: resolvedUnit.id,
+            transferredById: actorUserId,
+            assignedAgentId: assignedAgentId,
+            reason: `Reclassified during call intake: ${dto.enquiryCategory || dto.primaryService || 'Intent change'}`,
+            status: 'COMPLETED',
+            preserveHistory: true,
+            metadata: {
+              previousFoundation: existingLead.foundation,
+              newFoundation: dto.foundation,
+              callSid: session.reason || session.id,
+              actorEmail: user?.email,
+              actorUsername: user?.username || user?.name,
+            },
           },
-        },
-      });
+        });
+      } catch (auditErr: any) {
+        this.logger.warn(`Failed to create reclassification audit: ${auditErr.message}`);
+      }
     }
 
     let updatedLead: any = null;
@@ -878,7 +902,7 @@ export class EnquiryService {
           serviceInterest: resolvedServiceInterest,
           ...(resolvedUnit?.id ? { unitId: resolvedUnit.id } : {}),
           ...((!existingLead?.source || existingLead?.source === 'Manual Entry' || existingLead?.source === 'Unknown') ? { source: resolvedLeadSource } : {}),
-          ...(dto.enquiryCategory ? { enquiryCategory: dto.enquiryCategory } : {}),
+          ...(safeEnquiryCategory ? { enquiryCategory: safeEnquiryCategory } : {}),
           ...(dto.primaryService ? { primaryService: dto.primaryService } : {}),
           ...(dto.subServices ? { subServices: dto.subServices } : {}),
           ...(dto.patientName ? { patientName: dto.patientName } : {}),
@@ -912,29 +936,36 @@ export class EnquiryService {
 
       // Schedule follow-up if requested
       if (dto.followupDate) {
-        let agentId = user?.agentId;
-        if (!agentId) {
-          const fallbackAgent = await this.prisma.agent.findFirst();
-          agentId = fallbackAgent?.id;
-        }
+        const parsedFollowup = new Date(dto.followupDate);
+        if (!isNaN(parsedFollowup.getTime())) {
+          let agentId = user?.agentId;
+          if (!agentId) {
+            const fallbackAgent = await this.prisma.agent.findFirst();
+            agentId = fallbackAgent?.id;
+          }
 
-        if (agentId) {
-          await this.prisma.leadFollowup.create({
-            data: {
-              leadId: targetLeadId,
-              assignedAgentId: agentId,
-              followupDate: new Date(dto.followupDate),
-              meetingType: 'CALLBACK',
-              notes: dto.liveNotes || `Call intake disposition: ${dto.callOutcome || 'Completed'}`,
-              status: 'PENDING',
-            },
-          });
+          if (agentId) {
+            try {
+              await this.prisma.leadFollowup.create({
+                data: {
+                  leadId: targetLeadId,
+                  assignedAgentId: agentId,
+                  followupDate: parsedFollowup,
+                  meetingType: 'CALLBACK',
+                  notes: dto.liveNotes || `Call intake disposition: ${dto.callOutcome || 'Completed'}`,
+                  status: 'PENDING',
+                },
+              });
 
-          await this.prisma.lead.update({
-            where: { id: targetLeadId },
-            data: { status: 'FOLLOWUP_REQUIRED' },
-          });
-          updatedLead.status = 'FOLLOWUP_REQUIRED';
+              await this.prisma.lead.update({
+                where: { id: targetLeadId },
+                data: { status: 'FOLLOWUP_REQUIRED' },
+              });
+              updatedLead.status = 'FOLLOWUP_REQUIRED';
+            } catch (followupErr: any) {
+              this.logger.warn(`Failed to schedule follow-up: ${followupErr.message}`);
+            }
+          }
         }
       }
     }
@@ -1415,14 +1446,11 @@ export class EnquiryService {
   }
 
   async saveCallDraft(callSidOrId: string, draftData: any, user?: any) {
-    const session = await this.prisma.callSession.findFirst({
+    let session = await this.prisma.callSession.findFirst({
       where: {
         OR: this.getCallSessionLookupFilter(callSidOrId),
       },
     });
-    if (!session) {
-      throw new NotFoundException('CallSession not found');
-    }
     const timestamp = new Date().toISOString();
     const draftPayload = {
       ...draftData,
@@ -1430,11 +1458,29 @@ export class EnquiryService {
       savedBy: user?.name || user?.email || 'Agent',
       authorId: user?.id || user?.userId,
     };
+
+    if (!session) {
+      this.logger.log(`CallSession [${callSidOrId}] not found for draft. Provisioning pending draft session.`);
+      const rawUserId = user?.id || user?.userId;
+      const validUserId = this.isValidUuid(rawUserId) ? rawUserId : undefined;
+      session = await this.prisma.callSession.create({
+        data: {
+          reason: callSidOrId,
+          providerCallId: callSidOrId,
+          livekitRoom: callSidOrId,
+          status: 'IN_PROGRESS',
+          callerUserId: validUserId,
+          draftNotes: draftPayload,
+        },
+      });
+      return { success: true, savedAt: timestamp, draft: draftPayload, draftData: draftPayload, provisioned: true };
+    }
+
     await this.prisma.callSession.update({
       where: { id: session.id },
       data: { draftNotes: draftPayload },
     });
-    return { success: true, savedAt: timestamp, draft: draftPayload };
+    return { success: true, savedAt: timestamp, draft: draftPayload, draftData: draftPayload };
   }
 
   async getCallDraft(callSidOrId: string) {
@@ -1452,7 +1498,13 @@ export class EnquiryService {
       },
     });
     if (!session) {
-      throw new NotFoundException('CallSession not found');
+      return {
+        success: true,
+        draft: null,
+        draftData: null,
+        lead: null,
+        customer: null,
+      };
     }
     const draftContent = session.draftNotes || session.intakeForm || null;
     return {

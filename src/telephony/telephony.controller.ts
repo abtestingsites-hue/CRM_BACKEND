@@ -98,6 +98,11 @@ export class TelephonyController {
     return await this.telephonyService.getTransferAudits(req.query, (req as any).user);
   }
 
+  @Get('channels')
+  async getConfiguredChannels() {
+    return this.telephonyService.getConfiguredOmnichannelChannels();
+  }
+
   @Post('calls/:id/send-message')
   async sendMessageFromCall(
     @Param('id') id: string,
@@ -105,6 +110,32 @@ export class TelephonyController {
     @Req() req: Request,
   ) {
     return await this.telephonyService.sendMessageFromCall(id, body, (req as any).user);
+  }
+
+  @Post('calls/:id/send-multichannel')
+  async sendMultiChannelFromCall(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+  ) {
+    return await this.telephonyService.sendMultiChannelFromCall(id, body, (req as any).user);
+  }
+
+  @Get('leads/:leadId/eligible-same-unit-agents')
+  async getEligibleSameUnitAgents(
+    @Param('leadId') leadId: string,
+    @Req() req: Request,
+  ) {
+    return await this.telephonyService.getEligibleSameUnitAgents(leadId, (req as any).user);
+  }
+
+  @Post('leads/:leadId/reassign-agent')
+  async executeSameUnitAgentReassignment(
+    @Param('leadId') leadId: string,
+    @Body() body: any,
+    @Req() req: Request,
+  ) {
+    return await this.telephonyService.executeSameUnitAgentReassignment(leadId, body, (req as any).user);
   }
 
   @Get('customer-history/:identifier')

@@ -149,7 +149,7 @@ export const INITIAL_FOUNDATIONS: FoundationCatalogDefinition[] = [
     ],
     services: [
       {
-        name: 'Subsidized Elder Care Support',
+        name: 'Subsidized Senior Care Support',
         code: 'UNCF_SUBSIDIZED_CARE',
         subcategory: 'Subsidized Healthcare Support',
         description: 'Subsidized clinical and daily living support for economically disadvantaged seniors.',

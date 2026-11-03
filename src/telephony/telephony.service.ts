@@ -1909,19 +1909,23 @@ export class TelephonyService {
       const intakeData = (r.intakeForm as any) || {};
 
       // Contact and omnichannel eligibility
-      const phone = r.customer?.phone || r.lead?.phoneNumber || (r.transferHistory as any)?.phone;
-      const email = r.customer?.email || r.lead?.email;
-      const instagram = (r.customer as any)?.instagramUsername || (r.customer as any)?.platformUserId;
+      const rawPhone = r.customer?.phone || r.lead?.phoneNumber || r.callerNumber || r.calledNumber || (r.intakeForm as any)?.phone || (r.intakeForm as any)?.primaryPhone || (r.transferHistory as any)?.phone || null;
+      const normalizedPhone = rawPhone && rawPhone !== 'Unknown' ? this.normalizePhone(rawPhone) : null;
+      const phone = normalizedPhone ? normalizedPhone.e164 : (typeof rawPhone === 'string' ? rawPhone : null);
+      const email = r.customer?.email || r.lead?.email || (r.intakeForm as any)?.email || null;
+      const instagram = (r.customer as any)?.instagramUsername || (r.customer as any)?.platformUserId || (r.transferHistory as any)?.instagramUserId || null;
 
       const availableChannels: any[] = [];
       if (phone && !phone.startsWith('ig_')) {
         availableChannels.push({ channel: 'WHATSAPP', label: 'WhatsApp', destination: phone, isValid: true });
+        availableChannels.push({ channel: 'SMS', label: 'SMS', destination: phone, isValid: true });
       }
       if (email) {
         availableChannels.push({ channel: 'EMAIL', label: 'Email', destination: email, isValid: true });
       }
       if (instagram) {
         availableChannels.push({ channel: 'INSTAGRAM', label: 'Instagram', destination: instagram, isValid: true });
+        availableChannels.push({ channel: 'MESSENGER', label: 'Messenger', destination: instagram, isValid: true });
       }
 
       const requiredService = r.lead?.primaryService || r.lead?.serviceInterest || (r.intakeForm as any)?.primaryService || (r.intakeForm as any)?.serviceCategory || r.conversation?.primaryService || null;
@@ -3903,6 +3907,125 @@ export class TelephonyService {
       }
     }
 
+    // 4. SMS (Twilio SMS)
+    if (channelUpper === 'SMS') {
+      const cleanPhone = String(recipient || '').replace(/[^0-9+]/g, '').trim();
+      if (!cleanPhone || cleanPhone.replace(/[^0-9]/g, '').length < 8) {
+        return {
+          success: false,
+          provider: 'SMS',
+          status: 'FAILED',
+          deliveryStatus: 'REJECTED_INVALID_RECIPIENT',
+          error: 'Recipient must be a valid phone number for SMS delivery',
+          code: 'INVALID_RECIPIENT_FORMAT',
+        };
+      }
+
+      const twilioSid = process.env.TWILIO_ACCOUNT_SID;
+      const twilioToken = process.env.TWILIO_AUTH_TOKEN;
+      const twilioFrom = (process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_FROM_NUMBER || '+14155238886').replace(/^whatsapp:/i, '');
+
+      if (twilioSid && twilioToken) {
+        try {
+          const twilio = require('twilio');
+          const twilioClient = twilio(twilioSid, twilioToken);
+          const toFormatted = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
+          const res = await twilioClient.messages.create({
+            from: twilioFrom,
+            to: toFormatted,
+            body: content,
+          });
+
+          this.logger.log(`[SMS Provider] Delivered via Twilio SMS. SID: ${res.sid}`);
+          return {
+            success: true,
+            provider: 'TWILIO_SMS',
+            providerMessageId: res.sid,
+            status: 'SENT',
+            deliveryStatus: 'ACCEPTED_BY_PROVIDER',
+          };
+        } catch (twilioErr: any) {
+          this.logger.error(`[SMS Provider] Twilio SMS failed: ${twilioErr.message}`);
+          return {
+            success: false,
+            provider: 'TWILIO_SMS',
+            status: 'FAILED',
+            deliveryStatus: 'REJECTED_BY_PROVIDER',
+            error: `SMS Delivery Failed: ${twilioErr.message}`,
+            code: String(twilioErr.code || 'TWILIO_SMS_FAILED'),
+          };
+        }
+      }
+
+      return {
+        success: false,
+        provider: 'SMS',
+        status: 'FAILED',
+        deliveryStatus: 'PROVIDER_NOT_CONFIGURED',
+        error: 'No active SMS provider credentials configured.',
+        code: 'PROVIDER_NOT_CONFIGURED',
+      };
+    }
+
+    // 5. MESSENGER (Meta Graph API)
+    if (channelUpper === 'MESSENGER' || channelUpper === 'FACEBOOK') {
+      const psid = String(recipient || '').trim();
+      const metaToken = process.env.META_PAGE_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+      if (!metaToken) {
+        return {
+          success: false,
+          provider: 'META_MESSENGER',
+          status: 'FAILED',
+          deliveryStatus: 'PROVIDER_NOT_CONFIGURED',
+          error: 'Meta Page Access Token not configured for Messenger',
+          code: 'PROVIDER_NOT_CONFIGURED',
+        };
+      }
+
+      try {
+        const url = 'https://graph.facebook.com/v22.0/me/messages';
+        const res = await (fetch as any)(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${metaToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            recipient: { id: psid },
+            messaging_type: 'RESPONSE',
+            message: { text: content },
+          }),
+        });
+        const data = await res.json();
+        if (res.ok && data?.message_id) {
+          return {
+            success: true,
+            provider: 'META_MESSENGER',
+            providerMessageId: data.message_id,
+            status: 'SENT',
+            deliveryStatus: 'ACCEPTED_BY_PROVIDER',
+          };
+        }
+        return {
+          success: false,
+          provider: 'META_MESSENGER',
+          status: 'FAILED',
+          deliveryStatus: 'REJECTED_BY_PROVIDER',
+          error: data?.error?.message || 'Meta Messenger API rejected request',
+          code: String(data?.error?.code || 'META_MESSENGER_ERROR'),
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          provider: 'META_MESSENGER',
+          status: 'FAILED',
+          deliveryStatus: 'NETWORK_ERROR',
+          error: `Messenger error: ${err.message}`,
+          code: 'NETWORK_ERROR',
+        };
+      }
+    }
+
     return {
       success: false,
       provider: channelUpper,
@@ -4687,6 +4810,343 @@ export class TelephonyService {
         destinationUnit: destUnit.name,
         assignedAgentId: body.assignedAgentId || null,
         transferredAt: audit.createdAt.toISOString(),
+      };
+    });
+  }
+
+  getConfiguredOmnichannelChannels() {
+    const hasWhatsApp = Boolean(process.env.WHATSAPP_TOKEN || process.env.TWILIO_ACCOUNT_SID);
+    const hasInstagram = Boolean(process.env.META_PAGE_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN);
+    const hasMessenger = Boolean(process.env.META_PAGE_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN);
+    const hasEmail = Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+    const hasSms = Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN);
+
+    const channels: any[] = [];
+    if (hasWhatsApp) {
+      channels.push({
+        id: 'WHATSAPP',
+        name: 'WhatsApp',
+        icon: 'whatsapp',
+        configured: true,
+        provider: process.env.WHATSAPP_TOKEN ? 'Meta Cloud API' : 'Twilio WhatsApp',
+        identifierType: 'phone',
+        color: '#25D366',
+      });
+    }
+    if (hasInstagram) {
+      channels.push({
+        id: 'INSTAGRAM',
+        name: 'Instagram Direct',
+        icon: 'instagram',
+        configured: true,
+        provider: 'Meta Graph API',
+        identifierType: 'ig_user_id',
+        color: '#E4405F',
+      });
+    }
+    if (hasMessenger) {
+      channels.push({
+        id: 'MESSENGER',
+        name: 'Facebook Messenger',
+        icon: 'messenger',
+        configured: true,
+        provider: 'Meta Messenger API',
+        identifierType: 'psid',
+        color: '#0084FF',
+      });
+    }
+    if (hasSms) {
+      channels.push({
+        id: 'SMS',
+        name: 'SMS',
+        icon: 'sms',
+        configured: true,
+        provider: 'Twilio SMS',
+        identifierType: 'phone',
+        color: '#8B5CF6',
+      });
+    }
+    if (hasEmail) {
+      channels.push({
+        id: 'EMAIL',
+        name: 'Email (SMTP)',
+        icon: 'email',
+        configured: true,
+        provider: 'Nodemailer SMTP',
+        identifierType: 'email',
+        color: '#F97316',
+      });
+    }
+
+    return {
+      success: true,
+      channels,
+      totalConfigured: channels.length,
+    };
+  }
+
+  async sendMultiChannelFromCall(
+    callId: string,
+    body: {
+      channels: string[];
+      recipient?: string;
+      recipientsByChannel?: Record<string, string>;
+      message: string;
+      subject?: string;
+      leadId?: string;
+    },
+    user?: any,
+  ) {
+    if (!body.channels || !body.channels.length) {
+      throw new BadRequestException('At least one communication channel must be selected');
+    }
+    if (!body.message || !body.message.trim()) {
+      throw new BadRequestException('Message content cannot be empty');
+    }
+
+    const results: Record<string, any> = {};
+    for (const ch of body.channels) {
+      const channelUpper = ch.toUpperCase();
+      const channelRecipient = body.recipientsByChannel?.[channelUpper] || body.recipientsByChannel?.[ch] || body.recipient;
+      if (!channelRecipient) {
+        results[channelUpper] = {
+          success: false,
+          channel: channelUpper,
+          status: 'FAILED',
+          error: `No valid recipient identifier provided for ${channelUpper}`,
+        };
+        continue;
+      }
+
+      try {
+        const sendRes = await this.sendMessageFromCall(
+          callId,
+          {
+            channel: channelUpper,
+            recipient: channelRecipient,
+            message: body.message,
+            subject: body.subject,
+            leadId: body.leadId,
+          },
+          user,
+        );
+        results[channelUpper] = sendRes;
+      } catch (err: any) {
+        results[channelUpper] = {
+          success: false,
+          channel: channelUpper,
+          status: 'FAILED',
+          error: err.response?.message || err.message || 'Dispatch failed',
+        };
+      }
+    }
+
+    const successfulChannels = Object.keys(results).filter((k) => results[k]?.success);
+    return {
+      success: successfulChannels.length > 0,
+      allSucceeded: successfulChannels.length === body.channels.length,
+      successfulChannels,
+      results,
+    };
+  }
+
+  async getEligibleSameUnitAgents(leadId: string, user?: any) {
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        unit: true,
+        assignedAgent: { include: { user: true } },
+      },
+    });
+
+    if (!lead) throw new NotFoundException('Lead record not found');
+
+    const unitId = lead.unitId;
+    let sameUnitAgents: any[] = [];
+
+    // Query active agents with user and unitMemberships
+    const allActiveAgents = await this.prisma.agent.findMany({
+      where: {
+        status: { in: ['AVAILABLE', 'BUSY', 'OFFLINE'] as any },
+        isDeleted: false,
+        NOT: lead.assignedAgentId ? { id: lead.assignedAgentId } : undefined,
+      },
+      include: {
+        user: {
+          include: {
+            unitMemberships: {
+              include: { unit: true },
+            },
+          },
+        },
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    if (unitId) {
+      sameUnitAgents = allActiveAgents.filter((ag) => {
+        const belongsToUnit = ag.user?.unitMemberships?.some((m) => m.unitId === unitId);
+        const matchesDepartment = lead.unit && (ag.department === lead.unit.name || ag.department === lead.unit.code);
+        return belongsToUnit || matchesDepartment;
+      });
+    }
+
+    if (!sameUnitAgents.length && (lead.foundation || lead.unit?.code)) {
+      const matchCode = (lead.foundation || lead.unit?.code || '').toUpperCase();
+      sameUnitAgents = allActiveAgents.filter((ag) => {
+        const matchesCode = ag.user?.unitMemberships?.some((m) => m.unit?.code?.toUpperCase() === matchCode);
+        const matchesDept = (ag.department || '').toUpperCase().includes(matchCode);
+        return matchesCode || matchesDept;
+      });
+    }
+
+    // Fallback: if unit memberships not explicitly seeded in environment, list other available agents
+    if (!sameUnitAgents.length) {
+      sameUnitAgents = allActiveAgents;
+    }
+
+    return {
+      success: true,
+      lead: {
+        id: lead.id,
+        name: lead.customerName,
+        phone: lead.phoneNumber,
+        foundation: lead.foundation || 'UEC',
+        unitId: lead.unitId,
+        unitName: lead.unit?.name || lead.foundation || 'General Unit',
+        currentAssignedAgent: lead.assignedAgent ? {
+          id: lead.assignedAgent.id,
+          name: lead.assignedAgent.name,
+          email: lead.assignedAgent.user?.email || null,
+          department: lead.assignedAgent.department,
+        } : null,
+      },
+      eligibleAgents: sameUnitAgents.map((ag) => ({
+        id: ag.id,
+        name: ag.name,
+        department: ag.department || lead.unit?.name || 'General',
+        unitId: ag.user?.unitMemberships?.[0]?.unitId || lead.unitId || null,
+        status: ag.status,
+        email: ag.user?.email || null,
+      })),
+    };
+  }
+
+  async executeSameUnitAgentReassignment(
+    leadId: string,
+    body: {
+      destAgentId: string;
+      reason: string;
+    },
+    user?: any,
+  ) {
+    if (!body.reason || !body.reason.trim()) {
+      throw new BadRequestException('Reassignment reason is required and cannot be empty');
+    }
+    if (!body.destAgentId) {
+      throw new BadRequestException('Destination agent ID is required');
+    }
+
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: { unit: true, assignedAgent: true },
+    });
+    if (!lead) throw new NotFoundException('Lead record not found');
+
+    if (lead.assignedAgentId === body.destAgentId) {
+      throw new BadRequestException('Selected agent is already assigned to this lead');
+    }
+
+    const destAgent = await this.prisma.agent.findUnique({
+      where: { id: body.destAgentId },
+      include: {
+        user: {
+          include: {
+            unitMemberships: {
+              include: { unit: true },
+            },
+          },
+        },
+      },
+    });
+    if (!destAgent) throw new NotFoundException('Destination agent not found');
+
+    // Enforce strict SAME-UNIT constraint
+    if (lead.unitId && destAgent.user?.unitMemberships?.length) {
+      const agentBelongsToUnit = destAgent.user.unitMemberships.some((m) => m.unitId === lead.unitId);
+      const matchesDept = lead.unit && (destAgent.department === lead.unit.name || destAgent.department === lead.unit.code);
+      if (!agentBelongsToUnit && !matchesDept) {
+        const destUnitName = destAgent.user.unitMemberships[0]?.unit?.name || destAgent.department || 'Other';
+        throw new BadRequestException(
+          `Cross-unit assignment is rejected. Destination agent (${destAgent.name}) belongs to unit (${destUnitName}) rather than lead unit (${lead.unit?.name || lead.unitId}).`,
+        );
+      }
+    }
+
+    const sourceAgentName = lead.assignedAgent?.name || 'Unassigned';
+    const rawActorId = user?.id || user?.userId || null;
+    const isActorUuid = rawActorId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawActorId);
+    const actorUserId = isActorUuid ? rawActorId : null;
+
+    return await this.prisma.$transaction(async (tx) => {
+      const updatedLead = await tx.lead.update({
+        where: { id: leadId },
+        data: {
+          assignedAgentId: destAgent.id,
+        },
+      });
+
+      const audit = await tx.leadTransferAudit.create({
+        data: {
+          leadId,
+          sourceUnitId: lead.unitId || null,
+          destUnitId: lead.unitId || (await tx.businessUnit.findFirst())?.id!,
+          assignedAgentId: destAgent.id,
+          transferredById: actorUserId,
+          status: 'COMPLETED',
+          sourceDepartment: sourceAgentName,
+          destDepartment: destAgent.department || destAgent.name,
+          reason: body.reason.trim(),
+          preserveHistory: true,
+          metadata: {
+            reassignmentType: 'SAME_UNIT_AGENT_REASSIGNMENT',
+            sourceAgentId: lead.assignedAgentId || null,
+            sourceAgentName,
+            destAgentId: destAgent.id,
+            destAgentName: destAgent.name,
+            actorEmail: user?.email || 'Authorized Agent',
+            timestamp: new Date().toISOString(),
+          },
+        },
+      });
+
+      await tx.leadActivity.create({
+        data: {
+          leadId,
+          agentId: destAgent.id,
+          type: 'TRANSFER',
+          channel: 'SYSTEM',
+          direction: 'INTERNAL',
+          title: `Same-Unit Agent Reassignment to ${destAgent.name}`,
+          content: `Lead reassigned from ${sourceAgentName} to ${destAgent.name}. Reason: ${body.reason.trim()}`,
+          status: 'COMPLETED',
+          metadata: {
+            auditId: audit.id,
+            sourceAgent: sourceAgentName,
+            destAgent: destAgent.name,
+            reason: body.reason.trim(),
+          },
+        },
+      });
+
+      return {
+        success: true,
+        leadId: updatedLead.id,
+        customerName: updatedLead.customerName,
+        sourceAgent: sourceAgentName,
+        newAssignedAgent: destAgent.name,
+        assignedAgentId: destAgent.id,
+        reassignedAt: audit.createdAt.toISOString(),
       };
     });
   }

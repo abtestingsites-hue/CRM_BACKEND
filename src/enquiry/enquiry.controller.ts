@@ -85,13 +85,23 @@ export class EnquiryController {
     return await this.enquiryService.createOrSyncLead(conversationId, dto, req.user);
   }
 
-  // 4. Call Intake Form Persistence
+  // 4. Call Intake Form Persistence (Supports PATCH and POST, with call ID in param or body)
   @Patch('calls/:id/intake')
+  @Post('calls/:id/intake')
   async saveCallIntake(
     @Param('id') callSidOrId: string,
     @Body() dto: SaveCallIntakeDto,
     @Req() req: any,
   ) {
+    return await this.enquiryService.saveCallIntake(callSidOrId, dto, req.user);
+  }
+
+  @Post('calls/save-intake')
+  async saveCallIntakeDirect(
+    @Body() dto: SaveCallIntakeDto & { callSid?: string; sessionId?: string },
+    @Req() req: any,
+  ) {
+    const callSidOrId = dto.callSid || dto.sessionId || 'direct_intake';
     return await this.enquiryService.saveCallIntake(callSidOrId, dto, req.user);
   }
 
@@ -102,6 +112,7 @@ export class EnquiryController {
   }
 
   @Patch('leads/:id/intake')
+  @Post('leads/:id/intake')
   async updateStructuredEnquiry(
     @Param('id') leadId: string,
     @Body() dto: SaveCallIntakeDto,
@@ -110,8 +121,9 @@ export class EnquiryController {
     return await this.enquiryService.saveStructuredEnquiryLead(dto, req.user, leadId);
   }
 
-  // 4c. Postal Code Location Lookup
+  // 4c. Postal Code Location Lookup (Supports postal-lookup and pincode-lookup, param and query variants)
   @Get('postal-lookup/:postalCode')
+  @Get('pincode-lookup/:postalCode')
   async lookupPostalCode(
     @Param('postalCode') postalCode: string,
     @Query('country') country?: string,
@@ -119,8 +131,21 @@ export class EnquiryController {
     return await this.enquiryService.lookupPostalCode(postalCode, country);
   }
 
-  // 4d. Form Draft Persistence
+  @Get('postal-lookup')
+  @Get('pincode-lookup')
+  async lookupPostalCodeQuery(
+    @Query('postalCode') postalCode?: string,
+    @Query('pincode') pincode?: string,
+    @Query('country') country?: string,
+  ) {
+    const code = postalCode || pincode || '';
+    return await this.enquiryService.lookupPostalCode(code, country);
+  }
+
+  // 4d. Form Draft Persistence (Supports PATCH, POST, PUT)
   @Patch('calls/:id/draft')
+  @Post('calls/:id/draft')
+  @Put('calls/:id/draft')
   async saveCallDraft(
     @Param('id') callSidOrId: string,
     @Body() body: any,

@@ -15,3 +15,4 @@ ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "whatsappVerifiedAt" TIMESTAMP(3);
 
 -- AlterTable "CallSession"
 ALTER TABLE "CallSession" ADD COLUMN IF NOT EXISTS "whatsappStatus" TEXT DEFAULT 'UNKNOWN';
+
