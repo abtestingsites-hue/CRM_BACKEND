@@ -604,8 +604,12 @@ export class EnquiryService {
     });
   }
 
+  private isValidUuid(val?: string | null): boolean {
+    return typeof val === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+  }
+
   private getCallSessionLookupFilter(callSidOrId: string) {
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callSidOrId);
+    const isUuid = this.isValidUuid(callSidOrId);
     const orConditions: any[] = [
       { reason: callSidOrId },
       { livekitRoom: callSidOrId },
@@ -786,13 +790,15 @@ export class EnquiryService {
 
     // Check if unit reclassification occurred and audit it
     if (existingLead && resolvedUnit && existingLead.unitId && existingLead.unitId !== resolvedUnit.id && targetLeadId) {
+      const actorUserId = this.isValidUuid(user?.id) ? user.id : this.isValidUuid(user?.userId) ? user.userId : undefined;
+      const assignedAgentId = this.isValidUuid(user?.agentId) ? user.agentId : undefined;
       await this.prisma.leadTransferAudit.create({
         data: {
           leadId: targetLeadId,
           sourceUnitId: existingLead.unitId,
           destUnitId: resolvedUnit.id,
-          transferredById: user?.id || user?.userId || undefined,
-          assignedAgentId: user?.agentId || undefined,
+          transferredById: actorUserId,
+          assignedAgentId: assignedAgentId,
           reason: `Reclassified during call intake: ${dto.enquiryCategory || dto.primaryService || 'Intent change'}`,
           status: 'COMPLETED',
           preserveHistory: true,
@@ -800,6 +806,8 @@ export class EnquiryService {
             previousFoundation: existingLead.foundation,
             newFoundation: dto.foundation,
             callSid: session.reason || session.id,
+            actorEmail: user?.email,
+            actorUsername: user?.username || user?.name,
           },
         },
       });
@@ -906,19 +914,23 @@ export class EnquiryService {
     let savedLead;
     if (targetLead) {
       if (resolvedUnit && targetLead.unitId && targetLead.unitId !== resolvedUnit.id) {
+        const actorUserId = this.isValidUuid(user?.id) ? user.id : this.isValidUuid(user?.userId) ? user.userId : undefined;
+        const assignedAgentId = this.isValidUuid(user?.agentId) ? user.agentId : undefined;
         await this.prisma.leadTransferAudit.create({
           data: {
             leadId: targetLead.id,
             sourceUnitId: targetLead.unitId,
             destUnitId: resolvedUnit.id,
-            transferredById: user?.id || user?.userId || undefined,
-            assignedAgentId: user?.agentId || undefined,
+            transferredById: actorUserId,
+            assignedAgentId: assignedAgentId,
             reason: `Reclassified in structured enquiry: ${dto.enquiryCategory || dto.primaryService || 'Intent change'}`,
             status: 'COMPLETED',
             preserveHistory: true,
             metadata: {
               previousFoundation: targetLead.foundation,
               newFoundation: dto.foundation,
+              actorEmail: user?.email,
+              actorUsername: user?.username || user?.name,
             },
           },
         });
