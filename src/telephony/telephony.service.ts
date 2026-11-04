@@ -9,6 +9,7 @@ import { TelephonyGateway } from './telephony.gateway';
 import { LivekitService } from './livekit.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { CapacityService } from './capacity/capacity.service';
+import { IntegrationResolverService } from '../super-admin/integration-resolver.service';
 import { NormalizedCallEvent, OutboundCallRequest } from './providers/telephony-provider.interface';
 import type { FileInfo } from '@livekit/protocol';
 
@@ -31,6 +32,7 @@ export class TelephonyService {
     @Inject(forwardRef(() => LivekitService)) private readonly livekitService: LivekitService,
     private readonly analyticsService: AnalyticsService,
     @Optional() private readonly capacityService?: CapacityService,
+    @Optional() private readonly integrationResolver?: IntegrationResolverService,
   ) { }
 
   // ==========================================
@@ -3675,7 +3677,7 @@ export class TelephonyService {
     channel: string,
     recipient: string,
     content: string,
-    options?: { subject?: string }
+    options?: { subject?: string; unitId?: string | null }
   ): Promise<{
     success: boolean;
     provider: string;
@@ -3702,10 +3704,23 @@ export class TelephonyService {
         };
       }
 
-      // 1a. Try Meta WhatsApp Cloud API if configured
-      const metaToken = process.env.WHATSAPP_TOKEN;
-      const metaPhoneId = process.env.WHATSAPP_PHONE_ID;
+      // 1a. Resolve dynamic Unit-Scoped or Global credentials
+      let metaToken = process.env.WHATSAPP_TOKEN;
+      let metaPhoneId = process.env.WHATSAPP_PHONE_ID;
       let lastError: any = null;
+
+      if (this.integrationResolver) {
+        try {
+          const resolved = await this.integrationResolver.resolveCredentials('WHATSAPP', options?.unitId);
+          if (resolved.enabled && (resolved.secret || resolved.settings?.accessToken)) {
+            metaToken = resolved.secret || resolved.settings?.accessToken;
+            metaPhoneId = resolved.settings?.phoneNumberId || resolved.settings?.phoneId || metaPhoneId;
+            this.logger.log(`[INTEGRATION-RESOLVER] WhatsApp using ${resolved.status} (unitId=${resolved.unitId || 'GLOBAL'}, phoneId=${metaPhoneId})`);
+          }
+        } catch (resErr) {
+          this.logger.warn(`[INTEGRATION-RESOLVER] WhatsApp resolution warning: ${(resErr as any).message}`);
+        }
+      }
 
       if (metaToken && metaPhoneId) {
         try {
@@ -3808,7 +3823,18 @@ export class TelephonyService {
         };
       }
 
-      const metaToken = process.env.META_PAGE_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.ACCESS_TOKEN;
+      let metaToken = process.env.META_PAGE_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.ACCESS_TOKEN;
+      if (this.integrationResolver) {
+        try {
+          const resolved = await this.integrationResolver.resolveCredentials('INSTAGRAM', options?.unitId);
+          if (resolved.enabled && (resolved.secret || resolved.settings?.accessToken)) {
+            metaToken = resolved.secret || resolved.settings?.accessToken;
+            this.logger.log(`[INTEGRATION-RESOLVER] Instagram using ${resolved.status} (unitId=${resolved.unitId || 'GLOBAL'})`);
+          }
+        } catch (resErr) {
+          this.logger.warn(`[INTEGRATION-RESOLVER] Instagram resolution warning: ${(resErr as any).message}`);
+        }
+      }
       if (!metaToken) {
         return {
           success: false,
@@ -3886,8 +3912,25 @@ export class TelephonyService {
         };
       }
 
-      const emailUser = process.env.EMAIL_USER;
-      const emailPass = process.env.EMAIL_PASS;
+      let emailUser = process.env.EMAIL_USER;
+      let emailPass = process.env.EMAIL_PASS;
+      let emailHost = process.env.EMAIL_HOST || 'smtp.gmail.com';
+      let emailPort = parseInt(process.env.EMAIL_PORT || '465', 10) || 465;
+
+      if (this.integrationResolver) {
+        try {
+          const resolved = await this.integrationResolver.resolveCredentials('EMAIL', options?.unitId);
+          if (resolved.enabled && (resolved.secret || resolved.settings?.password)) {
+            emailPass = resolved.secret || resolved.settings?.password;
+            emailUser = resolved.settings?.username || resolved.settings?.smtpUser || emailUser;
+            emailHost = resolved.settings?.smtpHost || resolved.settings?.host || emailHost;
+            emailPort = parseInt(resolved.settings?.smtpPort || resolved.settings?.port || emailPort, 10);
+            this.logger.log(`[INTEGRATION-RESOLVER] Email using ${resolved.status} (unitId=${resolved.unitId || 'GLOBAL'}, user=${emailUser})`);
+          }
+        } catch (resErr) {
+          this.logger.warn(`[INTEGRATION-RESOLVER] Email resolution warning: ${(resErr as any).message}`);
+        }
+      }
       if (!emailUser || !emailPass) {
         return {
           success: false,
@@ -3902,8 +3945,8 @@ export class TelephonyService {
       try {
         const nodemailer = require('nodemailer');
         const transporter = nodemailer.createTransport({
-          host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-          port: parseInt(process.env.EMAIL_PORT || '465', 10) || 465,
+          host: emailHost,
+          port: emailPort,
           secure: true,
           auth: { user: emailUser, pass: emailPass },
         });
@@ -4178,11 +4221,12 @@ export class TelephonyService {
     }
 
     // DISPATCH MESSAGE VIA ACTUAL PROVIDER (Meta Cloud API, Twilio WhatsApp, Meta Graph API, or Nodemailer)
+    const effectiveUnitId = (body as any).unitId || (lead as any)?.unitId || (session as any)?.unitId || (user as any)?.unitId || null;
     const dispatchResult = await this.dispatchExternalMessage(
       channelUpper,
       body.recipient.trim(),
       body.message.trim(),
-      { subject: body.subject }
+      { subject: body.subject, unitId: effectiveUnitId }
     );
 
     // If Provider Rejected Delivery, persist as FAILED and report exact error

@@ -318,14 +318,21 @@ export class SuperAdminService {
    */
   async getIntegrations(unitId?: string) {
     const knownProviders = [
-      'INSTAGRAM',
       'WHATSAPP',
+      'INSTAGRAM',
+      'FACEBOOK',
+      'LINKEDIN',
       'EMAIL',
+      'SMS',
+      'TWILIO',
       'VOBIZ',
       'LIVEKIT',
       'EXOTEL',
       'GEMINI',
       'SUPABASE',
+      'WORDPRESS',
+      'GOOGLE_ADS',
+      'MAILCHIMP',
     ];
 
     // Resolve target unit if unitId provided
@@ -496,6 +503,32 @@ export class SuperAdminService {
       } else if (upperProvider === 'EMAIL') {
         isSuccess = Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
         if (!isSuccess) safeError = 'Missing EMAIL_USER or EMAIL_PASS';
+      } else if (upperProvider === 'FACEBOOK') {
+        const token = process.env.META_PAGE_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+        isSuccess = Boolean(token);
+        if (!isSuccess) safeError = 'Missing Meta Page Access Token for Facebook';
+      } else if (upperProvider === 'LINKEDIN') {
+        const clientId = process.env.LINKEDIN_CLIENT_ID;
+        isSuccess = Boolean(clientId || process.env.LINKEDIN_ACCESS_TOKEN);
+        if (!isSuccess) safeError = 'Missing LinkedIn Client Credentials';
+      } else if (upperProvider === 'SMS' || upperProvider === 'TWILIO') {
+        const sid = process.env.TWILIO_ACCOUNT_SID;
+        const auth = process.env.TWILIO_AUTH_TOKEN;
+        isSuccess = Boolean(sid && auth);
+        if (!isSuccess) safeError = 'Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN';
+      } else if (upperProvider === 'GOOGLE_ADS') {
+        const clientId = process.env.GOOGLE_ADS_CLIENT_ID;
+        const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+        isSuccess = Boolean(clientId || devToken);
+        if (!isSuccess) safeError = 'Missing Google Ads Client ID or Developer Token';
+      } else if (upperProvider === 'MAILCHIMP') {
+        const apiKey = process.env.MAILCHIMP_API_KEY;
+        isSuccess = Boolean(apiKey);
+        if (!isSuccess) safeError = 'Missing MAILCHIMP_API_KEY';
+      } else if (upperProvider === 'WORDPRESS') {
+        const secret = process.env.WEBSITE_LEADS_SECRET || process.env.WORDPRESS_WEBHOOK_SECRET;
+        isSuccess = Boolean(secret);
+        if (!isSuccess) safeError = 'Missing WordPress webhook authentication secret';
       } else if (upperProvider === 'GEMINI') {
         isSuccess = Boolean(process.env.GEMINI_API_KEY);
         if (!isSuccess) safeError = 'Missing GEMINI_API_KEY';
@@ -565,6 +598,61 @@ export class SuperAdminService {
   /**
    * Phase 4: Securely Update Integration Settings & Masked Secret
    */
+
+  /**
+   * Phase 28.4.3: Switch Unit Integration to Inherit from Global Default (without data loss)
+   */
+  async switchIntegrationToGlobal(provider: string, unitId: string, actorEmail: string) {
+    const upperProvider = provider.toUpperCase();
+    if (!unitId || unitId === 'ALL' || unitId === 'GLOBAL') {
+      throw new Error('Valid unit ID is required to switch to global default');
+    }
+
+    const existing = await this.prisma.integrationConfiguration.findFirst({
+      where: { provider: upperProvider, unitId },
+    });
+
+    if (existing) {
+      // Mark as disabled override so it cleanly falls back to global inheritance without deleting saved credentials
+      const updated = await this.prisma.integrationConfiguration.update({
+        where: { id: existing.id },
+        data: {
+          enabled: false,
+          status: 'NOT CONFIGURED',
+          updatedBy: actorEmail,
+          version: existing.version + 1,
+        },
+      });
+
+      await this.prisma.adminAuditLog.create({
+        data: {
+          actorEmail,
+          action: 'INTEGRATION_SWITCH_TO_GLOBAL',
+          resource: upperProvider,
+          resourceId: updated.id,
+          outcome: 'SUCCESS',
+          details: { provider: upperProvider, unitId, version: updated.version },
+        },
+      }).catch(() => {});
+
+      return {
+        success: true,
+        provider: upperProvider,
+        status: 'GLOBAL DEFAULT',
+        isInherited: true,
+        message: `Integration for ${upperProvider} switched to inherit Global Default`,
+      };
+    }
+
+    return {
+      success: true,
+      provider: upperProvider,
+      status: 'GLOBAL DEFAULT',
+      isInherited: true,
+      message: 'Inheriting Global Default',
+    };
+  }
+
   async updateIntegration(provider: string, data: { enabled?: boolean; settings?: any; secret?: string; unitId?: string }, actorEmail: string) {
     const upperProvider = provider.toUpperCase();
 

@@ -111,6 +111,17 @@ export class SuperAdminController {
     return this.superAdminService.updateIntegration(provider, body, actorEmail);
   }
 
+  @Post('integrations/:provider/switch-global')
+  @Roles('SUPER_ADMIN')
+  async switchIntegrationToGlobal(
+    @Param('provider') provider: string,
+    @Query('unitId') unitId: string,
+    @Req() req: any,
+  ) {
+    const actorEmail = req.user?.email || 'super_admin@crmtool.com';
+    return this.superAdminService.switchIntegrationToGlobal(provider, unitId, actorEmail);
+  }
+
   /**
    * Phase 5: Multi-Unit Management Endpoints
    */
