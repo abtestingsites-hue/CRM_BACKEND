@@ -4,7 +4,7 @@
   "main": "src/index.js",
   "scripts": {
     "build": "prisma generate && node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
-    "start": "node dist/src/main.js",
+    "start": "npx prisma db push --accept-data-loss && node dist/src/main.js",
     "dev": "npx @nestjs/cli start --watch",
     "test:telephony": "ts-node -T src/telephony/telephony-queue-orchestration.spec.ts",
     "test:socket-presence": "ts-node -T src/telephony/telephony-socket-auth-presence.spec.ts",

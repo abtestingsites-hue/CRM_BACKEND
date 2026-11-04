@@ -187,9 +187,9 @@ export class SuperAdminService {
   }
 
   /**
-   * Phase 3: Platform Overview
+   * Phase 3 & 28: Platform Overview with Unit Switcher Scope
    */
-  async getPlatformOverview() {
+  async getPlatformOverview(unitId?: string) {
     const startTime = Date.now();
     let dbStatus = 'HEALTHY';
     let dbLatencyMs = 0;
@@ -202,7 +202,32 @@ export class SuperAdminService {
       this.logger.error(`Database health check failed: ${err.message}`);
     }
 
-    const [activeAgentsData, totalUnits, totalIntegrations, recentLogs] = await Promise.all([
+    // Resolve target unit if unitId provided
+    let targetUnit: any = null;
+    if (unitId && unitId !== 'ALL') {
+      targetUnit = await this.prisma.businessUnit.findFirst({
+        where: { OR: [{ id: unitId }, { code: unitId }] },
+      }).catch(() => null);
+    }
+
+    const leadWhere: any = {};
+    const callWhere: any = {};
+    if (targetUnit) {
+      leadWhere.OR = [{ unitId: targetUnit.id }, { foundation: targetUnit.code }];
+      callWhere.department = { name: { contains: targetUnit.code } };
+    }
+
+    const [
+      activeAgentsData,
+      totalUnits,
+      totalIntegrations,
+      recentLogs,
+      leadsCount,
+      callsCount,
+      customersCount,
+      appointmentsCount,
+      allUnitsList,
+    ] = await Promise.all([
       this.getActiveAgents().catch(() => ({ count: 0, breakdown: { available: 0, busy: 0, wrapUp: 0, onCall: 0 } })),
       this.prisma.businessUnit.count().catch(() => 0),
       this.prisma.integrationConfiguration.count().catch(() => 0),
@@ -210,7 +235,28 @@ export class SuperAdminService {
         take: 10,
         orderBy: { createdAt: 'desc' },
       }).catch(() => []),
+      this.prisma.lead.count({ where: leadWhere }).catch(() => 0),
+      this.prisma.callSession.count({ where: callWhere }).catch(() => 0),
+      this.prisma.customer.count().catch(() => 0),
+      this.prisma.appointment.count().catch(() => 0),
+      this.prisma.businessUnit.findMany({ select: { id: true, code: true, name: true } }).catch(() => []),
     ]);
+
+    // Calculate cross-unit breakdown
+    const unitBreakdowns: Record<string, any> = {};
+    for (const u of allUnitsList) {
+      const [uLeads, uCalls] = await Promise.all([
+        this.prisma.lead.count({ where: { OR: [{ unitId: u.id }, { foundation: u.code }] } }).catch(() => 0),
+        this.prisma.callSession.count({ where: { department: { name: { contains: u.code } } } }).catch(() => 0),
+      ]);
+      unitBreakdowns[u.code] = {
+        id: u.id,
+        code: u.code,
+        name: u.name,
+        totalLeads: uLeads,
+        totalCalls: uCalls,
+      };
+    }
 
     return {
       status: 'OPERATIONAL',
@@ -225,6 +271,14 @@ export class SuperAdminService {
       businessUnitsCount: totalUnits,
       integrationsCount: totalIntegrations,
       recentAuditLogs: recentLogs,
+      activeUnit: targetUnit ? { id: targetUnit.id, code: targetUnit.code, name: targetUnit.name } : null,
+      kpis: {
+        totalLeads: leadsCount,
+        totalCalls: callsCount,
+        totalCustomers: customersCount,
+        totalAppointments: appointmentsCount,
+      },
+      unitBreakdowns,
     };
   }
 
@@ -260,21 +314,9 @@ export class SuperAdminService {
   }
 
   /**
-   * Phase 3 & 4: Integrations Inventory & Masked Configuration
+   * Phase 3, 4 & 28: Integrations Inventory with Enterprise Inheritance & Masking
    */
   async getIntegrations(unitId?: string) {
-    const where: any = {};
-    if (unitId) {
-      where.OR = [{ unitId }, { unitId: null }];
-    } else {
-      where.unitId = null;
-    }
-
-    const items = await this.prisma.integrationConfiguration.findMany({
-      where,
-      orderBy: { provider: 'asc' },
-    });
-
     const knownProviders = [
       'INSTAGRAM',
       'WHATSAPP',
@@ -286,42 +328,129 @@ export class SuperAdminService {
       'SUPABASE',
     ];
 
-    const mapped = items.map((item) => ({
-      id: item.id,
-      provider: item.provider,
-      unitId: item.unitId,
-      enabled: item.enabled,
-      settings: (item.settings && typeof item.settings === 'object') ? item.settings : {},
-      status: item.status,
-      secretMasked: item.secretLast4 || '••••••••',
-      version: item.version,
-      lastTestedAt: item.lastTestedAt,
-      lastTestStatus: item.lastTestStatus,
-      lastTestError: item.lastTestError,
-      updatedAt: item.updatedAt,
-    }));
+    // Resolve target unit if unitId provided
+    let targetUnit: any = null;
+    if (unitId && unitId !== 'ALL') {
+      targetUnit = await this.prisma.businessUnit.findFirst({
+        where: { OR: [{ id: unitId }, { code: unitId }] },
+      }).catch(() => null);
+    }
 
-    // Ensure all 8 real CRM providers appear in the Super Admin Console
+    // Fetch all configs (both global unitId=null and specific unitId)
+    const allConfigs = await this.prisma.integrationConfiguration.findMany({
+      orderBy: { provider: 'asc' },
+    });
+
+    const globalConfigs = allConfigs.filter((c) => !c.unitId);
+    const unitConfigs = targetUnit
+      ? allConfigs.filter((c) => c.unitId === targetUnit.id)
+      : [];
+
+    const result = [];
+
     for (const prov of knownProviders) {
-      if (!mapped.find((m) => m.provider === prov)) {
-        mapped.push({
-          id: `default_${prov.toLowerCase()}`,
-          provider: prov,
-          unitId: unitId || null,
-          enabled: true,
-          settings: {},
-          status: 'CONFIGURED',
-          secretMasked: '••••••••',
-          version: 1,
-          lastTestedAt: null,
-          lastTestStatus: null,
-          lastTestError: null,
-          updatedAt: new Date(),
-        });
+      const unitOverride = unitConfigs.find((c) => c.provider === prov);
+      const globalDefault = globalConfigs.find((c) => c.provider === prov);
+
+      if (targetUnit) {
+        // UNIT SCOPED VIEW:
+        if (unitOverride) {
+          result.push({
+            id: unitOverride.id,
+            provider: prov,
+            unitId: targetUnit.id,
+            unitCode: targetUnit.code,
+            unitName: targetUnit.name,
+            enabled: unitOverride.enabled,
+            settings: (unitOverride.settings && typeof unitOverride.settings === 'object') ? unitOverride.settings : {},
+            status: unitOverride.enabled ? 'UNIT OVERRIDE' : 'NOT CONFIGURED',
+            isInherited: false,
+            secretMasked: unitOverride.secretLast4 || '••••••••',
+            version: unitOverride.version,
+            lastTestedAt: unitOverride.lastTestedAt,
+            lastTestStatus: unitOverride.lastTestStatus,
+            lastTestError: unitOverride.lastTestError,
+            updatedAt: unitOverride.updatedAt,
+          });
+        } else if (globalDefault) {
+          result.push({
+            id: `inherited_${prov.toLowerCase()}`,
+            provider: prov,
+            unitId: targetUnit.id,
+            unitCode: targetUnit.code,
+            unitName: targetUnit.name,
+            enabled: globalDefault.enabled,
+            settings: (globalDefault.settings && typeof globalDefault.settings === 'object') ? globalDefault.settings : {},
+            status: globalDefault.enabled ? 'GLOBAL DEFAULT' : 'NOT CONFIGURED',
+            isInherited: true,
+            secretMasked: globalDefault.secretLast4 || '••••••••',
+            version: globalDefault.version,
+            lastTestedAt: globalDefault.lastTestedAt,
+            lastTestStatus: globalDefault.lastTestStatus,
+            lastTestError: globalDefault.lastTestError,
+            updatedAt: globalDefault.updatedAt,
+          });
+        } else {
+          result.push({
+            id: `unconfigured_${prov.toLowerCase()}`,
+            provider: prov,
+            unitId: targetUnit.id,
+            unitCode: targetUnit.code,
+            unitName: targetUnit.name,
+            enabled: false,
+            settings: {},
+            status: 'NOT CONFIGURED',
+            isInherited: false,
+            secretMasked: '••••••••',
+            version: 1,
+            lastTestedAt: null,
+            lastTestStatus: null,
+            lastTestError: null,
+            updatedAt: new Date(),
+          });
+        }
+      } else {
+        // GLOBAL PLATFORM VIEW:
+        const overrideCount = allConfigs.filter((c) => c.provider === prov && c.unitId !== null).length;
+        if (globalDefault) {
+          result.push({
+            id: globalDefault.id,
+            provider: prov,
+            unitId: null,
+            enabled: globalDefault.enabled,
+            settings: (globalDefault.settings && typeof globalDefault.settings === 'object') ? globalDefault.settings : {},
+            status: globalDefault.enabled ? 'GLOBAL DEFAULT' : 'NOT CONFIGURED',
+            isInherited: false,
+            overrideCount,
+            secretMasked: globalDefault.secretLast4 || '••••••••',
+            version: globalDefault.version,
+            lastTestedAt: globalDefault.lastTestedAt,
+            lastTestStatus: globalDefault.lastTestStatus,
+            lastTestError: globalDefault.lastTestError,
+            updatedAt: globalDefault.updatedAt,
+          });
+        } else {
+          result.push({
+            id: `default_${prov.toLowerCase()}`,
+            provider: prov,
+            unitId: null,
+            enabled: true,
+            settings: {},
+            status: 'GLOBAL DEFAULT',
+            isInherited: false,
+            overrideCount,
+            secretMasked: '••••••••',
+            version: 1,
+            lastTestedAt: null,
+            lastTestStatus: null,
+            lastTestError: null,
+            updatedAt: new Date(),
+          });
+        }
       }
     }
 
-    return mapped;
+    return result;
   }
 
   /**
@@ -504,12 +633,17 @@ export class SuperAdminService {
   /**
    * Phase 5: Business Units Management
    */
-  async getBusinessUnits() {
+  async getBusinessUnits(scopedUnitId?: string) {
+    const where: any = {};
+    if (scopedUnitId) {
+      where.OR = [{ id: scopedUnitId }, { code: scopedUnitId }];
+    }
     const units = await this.prisma.businessUnit.findMany({
+      where,
       orderBy: { createdAt: 'desc' },
       include: {
         _count: {
-          select: { memberships: true, integrations: true },
+          select: { memberships: true, integrations: true, leads: true },
         },
       },
     });
@@ -525,8 +659,7 @@ export class SuperAdminService {
       enabledModules: u.enabledModules,
       memberCount: u._count.memberships,
       integrationCount: u._count.integrations,
-      createdAt: u.createdAt,
-      updatedAt: u.updatedAt,
+      leadCount: u._count.leads,
     }));
   }
 

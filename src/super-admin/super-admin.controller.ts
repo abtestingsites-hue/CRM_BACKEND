@@ -42,9 +42,18 @@ export class SuperAdminController {
    * Phase 3: Platform Overview
    */
   @Get('overview')
-  @Roles('SUPER_ADMIN')
-  async getPlatformOverview() {
-    return this.superAdminService.getPlatformOverview();
+  @Roles('SUPER_ADMIN', 'ADMIN')
+  async getPlatformOverview(
+    @Query('unitId') unitId?: string,
+    @Req() req?: any,
+  ) {
+    const userRole = req?.user?.role;
+    const userUnitId = req?.user?.unitId;
+    let effectiveUnitId = unitId;
+    if (userRole === 'ADMIN' && userUnitId) {
+      effectiveUnitId = userUnitId;
+    }
+    return this.superAdminService.getPlatformOverview(effectiveUnitId);
   }
 
   /**
@@ -60,9 +69,18 @@ export class SuperAdminController {
    * Phase 3 & 4: Integrations Inventory with Masked Secrets
    */
   @Get('integrations')
-  @Roles('SUPER_ADMIN')
-  async getIntegrations(@Query('unitId') unitId?: string) {
-    return this.superAdminService.getIntegrations(unitId);
+  @Roles('SUPER_ADMIN', 'ADMIN')
+  async getIntegrations(
+    @Query('unitId') unitId?: string,
+    @Req() req?: any,
+  ) {
+    const userRole = req?.user?.role;
+    const userUnitId = req?.user?.unitId;
+    let effectiveUnitId = unitId;
+    if (userRole === 'ADMIN' && userUnitId) {
+      effectiveUnitId = userUnitId;
+    }
+    return this.superAdminService.getIntegrations(effectiveUnitId);
   }
 
   /**
@@ -97,8 +115,13 @@ export class SuperAdminController {
    * Phase 5: Multi-Unit Management Endpoints
    */
   @Get('units')
-  @Roles('SUPER_ADMIN')
-  async getBusinessUnits() {
+  @Roles('SUPER_ADMIN', 'ADMIN', 'SUPERVISOR')
+  async getBusinessUnits(@Req() req?: any) {
+    const userRole = req?.user?.role;
+    const userUnitId = req?.user?.unitId;
+    if (userRole === 'ADMIN' && userUnitId) {
+      return this.superAdminService.getBusinessUnits(userUnitId);
+    }
     return this.superAdminService.getBusinessUnits();
   }
 

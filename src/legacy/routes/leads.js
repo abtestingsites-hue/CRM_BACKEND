@@ -471,8 +471,28 @@ router.get('/', async (req, res) => {
 
     res.json(formatted);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch leads' });
+    console.error('[Leads Primary Query Failed - Attempting resilient fallback]:', err.message);
+    try {
+      const fallbackLeads = await prisma.lead.findMany({
+        take: 100,
+        orderBy: { createdAt: 'desc' }
+      });
+      const safeFormatted = fallbackLeads.map(l => ({
+        id: l.id,
+        customerName: l.customerName,
+        phoneNumber: l.phoneNumber,
+        serviceInterest: l.serviceInterest,
+        source: l.source,
+        status: l.status,
+        createdAt: l.createdAt,
+        agentName: 'Unassigned',
+        enquirySummary: l.primaryService || l.serviceInterest || 'Client Enquiry',
+      }));
+      return res.json(safeFormatted);
+    } catch (fallbackErr) {
+      console.error('[Leads Fallback Query Also Failed]:', fallbackErr.message);
+      res.status(500).json({ error: 'Failed to fetch leads' });
+    }
   }
 });
 

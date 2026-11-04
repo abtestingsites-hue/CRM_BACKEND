@@ -43,7 +43,7 @@ async function analyzeLeadSentiment(transcript, agentNotes) {
   }
 }
 
-async function analyzeElderCareEnquiry(transcript, customerContext = '') {
+async function analyzeEnquiryIntelligence(transcript, customerContext = '') {
   try {
     const prompt = `
       You are an expert Clinical Intake & Sales AI for CRM Tool (ARTIBOTS INNOVATION / Paramantra).
@@ -58,7 +58,7 @@ async function analyzeElderCareEnquiry(transcript, customerContext = '') {
       - "Palliative Care"
       - "Home Nursing"
       - "Physiotherapy"
-      - "Elderly Personal Care"
+      - "Personal Care Support"
       - "Medical or Care Consultation"
       - "Pricing and Availability"
       - "Appointment or Facility Visit"
@@ -94,7 +94,7 @@ async function analyzeElderCareEnquiry(transcript, customerContext = '') {
         "contactNumber": null, // ONLY if explicitly typed by the customer in conversation! Never infer.
         "missingInfo": ["patient_name", "location", "care_urgency"],
         "suggestedNextQuestion": "Would you like to schedule an assessment visit for your father?",
-        "summary": "Customer inquiring about dementia care options for elderly parent in Chennai.",
+        "summary": "Customer inquiring about dementia care options for patient in Chennai.",
         "sentiment": "POSITIVE",
         "conversion_probability": 75,
         "recommended_action": "SCHEDULE_FOLLOWUP"
@@ -215,7 +215,7 @@ async function analyzeAndSaveConversation(conversationId, io) {
     const customerNotes = conversation.customer?.notes?.map(n => n.content).join('\n') || '';
     
     // Run deep ElderCare enquiry intelligence
-    const intelligence = await analyzeElderCareEnquiry(transcript, customerNotes);
+    const intelligence = await analyzeEnquiryIntelligence(transcript, customerNotes);
     
     // Save AI Summary
     const aiSummary = await prisma.aiSummary.upsert({
@@ -334,7 +334,10 @@ async function analyzeAndSaveConversation(conversationId, io) {
 
 module.exports = {
   analyzeLeadSentiment,
-  analyzeElderCareEnquiry,
+  analyzeEnquiryIntelligence,
   analyzeAndSaveConversation
 };
 
+
+const analyzeElderCareEnquiry = analyzeEnquiryIntelligence;
+module.exports.analyzeElderCareEnquiry = analyzeElderCareEnquiry;

@@ -47,8 +47,17 @@ router.get('/', async (req, res) => {
 
     res.json(followups);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch followups' });
+    console.error('[Followups Primary Query Failed - Attempting resilient fallback]:', err.message);
+    try {
+      const fallbackFollowups = await prisma.leadFollowup.findMany({
+        take: 100,
+        orderBy: { followupDate: 'asc' },
+      });
+      return res.json(fallbackFollowups);
+    } catch (fallbackErr) {
+      console.error('[Followups Fallback Also Failed]:', fallbackErr.message);
+      res.status(500).json({ error: 'Failed to fetch followups' });
+    }
   }
 });
 

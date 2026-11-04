@@ -936,19 +936,34 @@ app.post('/api/messages/send-instagram', requireAuth, async (req, res) => {
   }
 });
 
-// Fetch messages for a specific conversation
-app.get('/api/v1/conversations/:id/messages', requireAuth, async (req, res) => {
+// Fetch messages for a specific conversation (Dual mounted: /api/v1/conversations/:id/messages & /conversations/:id/messages)
+const handleGetConversationMessages = async (req, res) => {
   try {
-    if (!UUID_REGEX.test(req.params.id)) {
-      return res.status(404).json({ error: 'Conversation not found' });
+    const rawId = req.params.id;
+    if (!UUID_REGEX.test(rawId)) {
+      return res.json([]);
     }
 
-    const conversation = await prisma.conversation.findUnique({
-      where: { id: req.params.id },
+    let conversation = await prisma.conversation.findUnique({
+      where: { id: rawId },
     });
 
+    // If not found by direct conversation ID, check if it was invoked with a callSession ID
     if (!conversation) {
-      return res.status(404).json({ error: 'Conversation not found' });
+      const call = await prisma.callSession.findUnique({
+        where: { id: rawId },
+        select: { conversationId: true },
+      }).catch(() => null);
+
+      if (call?.conversationId) {
+        conversation = await prisma.conversation.findUnique({
+          where: { id: call.conversationId },
+        }).catch(() => null);
+      }
+    }
+
+    if (!conversation) {
+      return res.json([]);
     }
 
     const user = req.user;
@@ -958,28 +973,31 @@ app.get('/api/v1/conversations/:id/messages', requireAuth, async (req, res) => {
     }
 
     const messages = await prisma.message.findMany({
-      where: { conversationId: req.params.id },
+      where: { conversationId: conversation.id },
       orderBy: { createdAt: 'asc' }
     });
 
     const formatted = messages.map(m => ({
       id: m.id,
-      sender: m.senderType.toLowerCase(),
-      content: m.content,
-      timestamp: m.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      status: m.status.toLowerCase(),
-      aiSuggested: m.isAiSuggested
+      sender: (m.senderType || 'agent').toLowerCase(),
+      content: m.content || '',
+      timestamp: m.createdAt ? m.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+      status: (m.status || 'sent').toLowerCase(),
+      aiSuggested: Boolean(m.isAiSuggested)
     }));
 
     res.json(formatted);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch messages' });
+    console.error('[Conversation Messages Error]:', err.message);
+    res.json([]);
   }
-});
+};
 
-// Mark conversation as read
-app.put('/api/v1/conversations/:id/read', requireAuth, async (req, res) => {
+app.get('/api/v1/conversations/:id/messages', requireAuth, handleGetConversationMessages);
+app.get('/conversations/:id/messages', requireAuth, handleGetConversationMessages);
+
+// Mark conversation as read (Dual mounted)
+const handleMarkConversationRead = async (req, res) => {
   try {
     if (!UUID_REGEX.test(req.params.id)) {
       return res.status(404).json({ error: 'Conversation not found' });
@@ -1012,7 +1030,10 @@ app.put('/api/v1/conversations/:id/read', requireAuth, async (req, res) => {
     console.error('Error marking conversation as read:', err);
     res.status(500).json({ error: 'Failed to mark as read' });
   }
-});
+};
+
+app.put('/api/v1/conversations/:id/read', requireAuth, handleMarkConversationRead);
+app.put('/conversations/:id/read', requireAuth, handleMarkConversationRead);
 
 // Fetch AI Call Records (Call Logs with AI Summaries)
 app.get('/api/v1/call-records', requireAuth, async (req, res) => {

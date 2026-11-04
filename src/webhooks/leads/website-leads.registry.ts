@@ -64,11 +64,11 @@ export class WebsiteLeadsRegistry {
       'universal-eldercare',
       {
         sourceId: 'universal-eldercare',
-        name: 'Universal Elder Care',
+        name: 'Universal Enterprise Care (UEC)',
         websiteUrl: 'https://www.universaleldercare.com',
         envSecretKey: 'LEAD_WEBHOOK_SECRET_UNIVERSAL_ELDERCARE',
         defaultSecret: 'sec_universal_eldercare_2026',
-        defaultServiceInterest: 'Elder Care & Support',
+        defaultServiceInterest: 'Care & Support',
         sourceLabel: 'Website: universaleldercare.com',
         adapterType: 'landing_page_enquiry',
       },
@@ -526,7 +526,7 @@ export class WebsiteLeadsRegistry {
     const customerName = raw.name || raw.fullName || raw.customerName || 'Unknown Lead';
     const phoneNumber = this.cleanPhone(raw.phone || raw.phoneNumber || raw.mobile);
     const email = raw.email ? String(raw.email).trim().toLowerCase() : null;
-    const serviceInterest = raw.service || raw.serviceInterest || 'Elder Care & Support';
+    const serviceInterest = raw.service || raw.serviceInterest || 'Care & Support';
     const notes = raw.message || raw.notes || raw.enquiry || null;
     const externalLeadId = this.cleanExternalId(raw);
 
