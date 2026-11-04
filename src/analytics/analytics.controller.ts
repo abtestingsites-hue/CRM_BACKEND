@@ -596,7 +596,7 @@ export class AnalyticsController {
     }));
 
     let kpis = [];
-    if (type === 'sales_lead') {
+    if (type === 'sales_lead' || type === 'lead') {
       kpis = [
         { label: 'New Leads', value: String(activeLeads), change: 'Live', isPositive: true },
         { label: 'Qualified Leads', value: String(positiveLeads), change: 'Live', isPositive: true },

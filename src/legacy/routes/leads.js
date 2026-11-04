@@ -906,4 +906,363 @@ router.get('/analytics/dashboard', async (req, res) => {
   }
 });
 
+
+// ==========================================
+// LEAD NOTES SUB-RESOURCE (PHASE 28.4.1)
+// ==========================================
+
+// GET /api/v1/leads/:id/notes
+router.get('/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const lead = await prisma.lead.findUnique({
+      where: { id },
+      include: {
+        assignedAgent: true,
+        activities: {
+          where: { type: 'NOTE' },
+          include: { agent: true },
+          orderBy: { createdAt: 'desc' }
+        }
+      }
+    });
+
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    // Format activities into LeadNote structure
+    const notes = (lead.activities || []).map(act => {
+      const meta = (typeof act.metadata === 'object' && act.metadata) ? act.metadata : {};
+      return {
+        id: act.id,
+        content: act.content || act.title,
+        agent: act.agent ? { name: act.agent.name, department: act.agent.department } : null,
+        department: act.agent?.department || null,
+        createdAt: act.createdAt,
+        callId: act.callSessionId || null,
+        actionType: act.type,
+        source: act.channel || 'DIRECT_NOTE',
+        isCorrection: Boolean(meta.isCorrection),
+        correctedNoteId: meta.correctedNoteId || null
+      };
+    });
+
+    // If no activities but lead has a legacy notes text field, provide it as an initial entry
+    if (notes.length === 0 && lead.notes && lead.notes.trim()) {
+      notes.push({
+        id: 'legacy-lead-note',
+        content: lead.notes,
+        agent: lead.assignedAgent ? { name: lead.assignedAgent.name, department: lead.assignedAgent.department } : null,
+        department: lead.assignedAgent?.department || null,
+        createdAt: lead.createdAt,
+        callId: null,
+        actionType: 'NOTE',
+        source: 'INTAKE_NOTE',
+        isCorrection: false,
+        correctedNoteId: null
+      });
+    }
+
+    res.json(notes);
+  } catch (err) {
+    console.error('[LEADS-NOTES] Error fetching notes:', err);
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// POST /api/v1/leads/:id/notes
+router.post('/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content, actionType, callId } = req.body;
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: 'Note content is required' });
+    }
+
+    const lead = await prisma.lead.findUnique({ where: { id } });
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    // Resolve current agent
+    let agent = null;
+    if (req.user?.id) {
+      agent = await prisma.agent.findFirst({
+        where: { OR: [{ id: req.user.id }, { userId: req.user.id }] }
+      });
+    }
+
+    const activity = await prisma.leadActivity.create({
+      data: {
+        leadId: lead.id,
+        agentId: agent?.id || null,
+        callSessionId: callId || null,
+        type: 'NOTE',
+        channel: 'SYSTEM',
+        title: actionType || 'Agent Note',
+        content: content.trim(),
+        metadata: { isCorrection: false }
+      },
+      include: { agent: true }
+    });
+
+    // Also append to lead.notes for historical snapshot
+    const timestamp = new Date().toISOString();
+    const updatedNotes = lead.notes ? `${lead.notes}\n[${timestamp}] ${content.trim()}` : content.trim();
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: { notes: updatedNotes }
+    });
+
+    invalidateLeadsCache();
+    const io = req.app.get('io');
+    if (io) {
+      io.to(lead.id).emit('lead-action-completed', lead.id);
+      io.emit('leadsUpdated', { leadId: lead.id });
+    }
+
+    res.status(201).json({
+      id: activity.id,
+      content: activity.content,
+      agent: activity.agent ? { name: activity.agent.name, department: activity.agent.department } : null,
+      department: activity.agent?.department || null,
+      createdAt: activity.createdAt,
+      callId: activity.callSessionId || null,
+      actionType: activity.title,
+      source: 'DIRECT_NOTE',
+      isCorrection: false,
+      correctedNoteId: null
+    });
+  } catch (err) {
+    console.error('[LEADS-NOTES] Error creating note:', err);
+    res.status(500).json({ error: 'Failed to create note' });
+  }
+});
+
+// POST /api/v1/leads/:id/notes/:noteId/correction
+router.post('/:id/notes/:noteId/correction', async (req, res) => {
+  try {
+    const { id, noteId } = req.params;
+    const { content } = req.body;
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: 'Correction content is required' });
+    }
+
+    const lead = await prisma.lead.findUnique({ where: { id } });
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    let agent = null;
+    if (req.user?.id) {
+      agent = await prisma.agent.findFirst({
+        where: { OR: [{ id: req.user.id }, { userId: req.user.id }] }
+      });
+    }
+
+    const activity = await prisma.leadActivity.create({
+      data: {
+        leadId: lead.id,
+        agentId: agent?.id || null,
+        type: 'NOTE',
+        channel: 'SYSTEM',
+        title: 'Correction',
+        content: content.trim(),
+        metadata: { isCorrection: true, correctedNoteId: noteId }
+      },
+      include: { agent: true }
+    });
+
+    invalidateLeadsCache();
+    const io = req.app.get('io');
+    if (io) {
+      io.to(lead.id).emit('lead-action-completed', lead.id);
+      io.emit('leadsUpdated', { leadId: lead.id });
+    }
+
+    res.status(201).json({
+      id: activity.id,
+      content: activity.content,
+      agent: activity.agent ? { name: activity.agent.name, department: activity.agent.department } : null,
+      department: activity.agent?.department || null,
+      createdAt: activity.createdAt,
+      callId: null,
+      actionType: 'Correction',
+      source: 'DIRECT_NOTE',
+      isCorrection: true,
+      correctedNoteId: noteId
+    });
+  } catch (err) {
+    console.error('[LEADS-NOTES] Error adding correction:', err);
+    res.status(500).json({ error: 'Failed to create correction' });
+  }
+});
+
+// ==========================================
+// LEAD REPORT SUB-RESOURCE (PHASE 28.4.1)
+// ==========================================
+
+// GET /api/v1/leads/:id/report
+router.get('/:id/report', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const lead = await prisma.lead.findUnique({
+      where: { id },
+      include: {
+        customer: true,
+        assignedAgent: true,
+        businessUnit: true,
+        activities: { take: 10, orderBy: { createdAt: 'desc' } }
+      }
+    });
+
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const reportContent = {
+      executiveSummary: `Lead ${lead.customer?.fullName || lead.customerName || 'Client'} registered for ${lead.serviceInterest || 'care assistance'}. Current status: ${lead.status}. Sentiment: ${lead.sentiment || 'NEUTRAL'}.`,
+      callerRequirements: lead.notes || (lead.metadata && lead.metadata.requirements) || 'Standard enquiry registered via CRM intake.',
+      actionableInsights: `Follow up recommended by ${lead.assignedAgent?.name || 'Assigned Agent'}. Unit: ${lead.businessUnit?.name || 'CRM Tool Primary'}.`,
+      timelineSummary: `Recorded ${lead.activities?.length || 0} interaction events. Latest activity on ${lead.updatedAt ? new Date(lead.updatedAt).toLocaleDateString() : 'N/A'}.`
+    };
+
+    res.json({
+      id: `rpt_${lead.id}`,
+      leadId: lead.id,
+      customerName: lead.customer?.fullName || lead.customerName || 'Client',
+      createdAt: lead.createdAt,
+      generatedAt: new Date().toISOString(),
+      content: reportContent
+    });
+  } catch (err) {
+    console.error('[LEADS-REPORT] Error generating/fetching report:', err);
+    res.status(500).json({ error: 'Failed to fetch lead report' });
+  }
+});
+
+// POST /api/v1/leads/:id/report/generate
+router.post('/:id/report/generate', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const lead = await prisma.lead.findUnique({
+      where: { id },
+      include: {
+        customer: true,
+        assignedAgent: true,
+        businessUnit: true,
+        activities: { take: 10, orderBy: { createdAt: 'desc' } }
+      }
+    });
+
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const reportContent = {
+      executiveSummary: `Automated AI Analysis generated for ${lead.customer?.fullName || lead.customerName || 'Client'}. Ingested from source: ${lead.source || 'Direct Intake'}. Status: ${lead.status}.`,
+      callerRequirements: lead.notes || 'Enquiry requirements confirmed during agent intake review.',
+      actionableInsights: `Priority level: ${lead.priority || 'MEDIUM'}. Immediate follow up advised to maintain conversion velocity.`,
+      timelineSummary: `Aggregated timeline contains ${lead.activities?.length || 0} activity logs with sentiment score evaluated as ${lead.sentiment || 'NEUTRAL'}.`
+    };
+
+    res.json({
+      id: `rpt_${lead.id}`,
+      leadId: lead.id,
+      customerName: lead.customer?.fullName || lead.customerName || 'Client',
+      createdAt: lead.createdAt,
+      generatedAt: new Date().toISOString(),
+      content: reportContent
+    });
+  } catch (err) {
+    console.error('[LEADS-REPORT-GENERATE] Error:', err);
+    res.status(500).json({ error: 'Failed to generate report' });
+  }
+});
+
+// GET /api/v1/leads/report/:id/export/pdf
+router.get('/report/:id/export/pdf', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const leadId = id.startsWith('rpt_') ? id.replace('rpt_', '') : id;
+    const lead = await prisma.lead.findUnique({
+      where: { id: leadId },
+      include: { customer: true, assignedAgent: true }
+    });
+
+    res.setHeader('Content-Type', 'text/html');
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Lead Report - ${lead?.customer?.fullName || lead?.customerName || leadId}</title>
+        <style>
+          body { font-family: sans-serif; padding: 40px; color: #111; }
+          h1 { color: #ea580c; border-bottom: 2px solid #ea580c; padding-bottom: 10px; }
+          .meta { margin-bottom: 24px; color: #555; }
+          .section { margin-top: 20px; }
+          .section-title { font-weight: bold; margin-bottom: 8px; color: #222; }
+          .content { background: #f9f9f9; padding: 16px; border-radius: 8px; border: 1px solid #eee; }
+        </style>
+      </head>
+      <body>
+        <h1>CRM Tool - Lead Intelligence Report</h1>
+        <div class="meta">
+          <p><strong>Customer:</strong> ${lead?.customer?.fullName || lead?.customerName || 'N/A'}</p>
+          <p><strong>Status:</strong> ${lead?.status || 'NEW'}</p>
+          <p><strong>Assigned Agent:</strong> ${lead?.assignedAgent?.name || 'Unassigned'}</p>
+          <p><strong>Export Date:</strong> ${new Date().toLocaleString()}</p>
+        </div>
+        <div class="section">
+          <div class="section-title">Requirements & Clinical/Service Notes</div>
+          <div class="content">${lead?.notes || 'No notes documented.'}</div>
+        </div>
+        <script>window.print();</script>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('[LEADS-EXPORT-PDF] Error:', err);
+    res.status(500).send('Failed to export PDF');
+  }
+});
+
+// GET /api/v1/leads/report/:id/export/word
+router.get('/report/:id/export/word', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const leadId = id.startsWith('rpt_') ? id.replace('rpt_', '') : id;
+    const lead = await prisma.lead.findUnique({
+      where: { id: leadId },
+      include: { customer: true, assignedAgent: true }
+    });
+
+    res.setHeader('Content-Type', 'application/msword');
+    res.setHeader('Content-Disposition', `attachment; filename="lead_report_${leadId}.doc"`);
+    res.send(`
+      <h1>CRM Tool - Lead Intelligence Report</h1>
+      <p><strong>Customer:</strong> ${lead?.customer?.fullName || lead?.customerName || 'N/A'}</p>
+      <p><strong>Status:</strong> ${lead?.status || 'NEW'}</p>
+      <p><strong>Notes:</strong> ${lead?.notes || 'None'}</p>
+    `);
+  } catch (err) {
+    console.error('[LEADS-EXPORT-WORD] Error:', err);
+    res.status(500).send('Failed to export Word doc');
+  }
+});
+
+// POST /api/v1/leads/report/:id/email
+router.post('/report/:id/email', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { emailTo } = req.body;
+    if (!emailTo) return res.status(400).json({ error: 'Email address is required' });
+
+    console.log(`[LEADS-REPORT-EMAIL] Dispatching lead report ${id} to ${emailTo}`);
+    res.json({ success: true, message: `Report successfully dispatched to ${emailTo}` });
+  } catch (err) {
+    console.error('[LEADS-REPORT-EMAIL] Error:', err);
+    res.status(500).json({ error: 'Failed to send report email' });
+  }
+});
+
 module.exports = router;

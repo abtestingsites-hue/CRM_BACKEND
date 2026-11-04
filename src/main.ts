@@ -82,8 +82,12 @@ async function bootstrap() {
         'x-hub-signature-256',
         'Cache-Control',
         'Pragma',
+        'x-crm-unit-id',
+        'X-CRM-Unit-Id',
+        'x-agent-id',
+        'X-Agent-Id',
       ],
-      exposedHeaders: ['Content-Range', 'X-Content-Range'],
+      exposedHeaders: ['Content-Range', 'X-Content-Range', 'x-crm-unit-id', 'X-CRM-Unit-Id'],
     });
 
     app.enableShutdownHooks();

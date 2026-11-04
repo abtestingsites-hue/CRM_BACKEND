@@ -26,7 +26,28 @@ const redisClient = process.env.REDIS_URL
 redisClient.on('error', (err) => console.warn('[Redis Legacy] Warning:', err.message));
 
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({
+  origin: true,
+  credentials: true,
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Accept',
+    'X-Requested-With',
+    'x-crm-unit-id',
+    'X-CRM-Unit-Id',
+    'x-agent-id',
+    'X-Agent-Id',
+    'Cache-Control',
+    'Pragma',
+    'x-vobiz-signature',
+    'x-signature',
+    'x-hub-signature-256'
+  ],
+  exposedHeaders: ['Content-Range', 'X-Content-Range', 'x-crm-unit-id', 'X-CRM-Unit-Id'],
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS']
+}));
+app.options('*', cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Vobiz sends form-urlencoded usually
 
@@ -1887,7 +1908,7 @@ const handleDashboardAnalytics = async (req, res) => {
         ];
 
     let kpis = [];
-    if (type === 'sales_lead') {
+    if (type === 'sales_lead' || type === 'lead') {
       kpis = [
         { label: 'New Leads', value: String(activeLeads), change: 'Live', isPositive: true },
         { label: 'Qualified Leads', value: String(positiveLeads), change: 'Live', isPositive: true },
