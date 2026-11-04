@@ -1,4 +1,4 @@
-import { Controller, All, Post, Patch, Req, Res, Body, Logger, Header, Get, Inject, HttpException, Param, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { Controller, All, Post, Patch, Req, Res, Body, Logger, Header, Get, Inject, HttpException, Param, UnauthorizedException, BadRequestException, Query, ForbiddenException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { LivekitService } from './livekit.service';
 import { TelephonyService } from './telephony.service';
@@ -27,8 +27,8 @@ export class TelephonyController {
   ) {}
 
   @Get('dashboard-calls')
-  async getDashboardCalls() {
-    return await this.telephonyService.getDashboardCalls();
+  async getDashboardCalls(@Req() req: Request, @Query('unitId') unitId?: string) {
+    return await this.telephonyService.getDashboardCalls(unitId, (req as any).user);
   }
 
   @Get('queue/operations')

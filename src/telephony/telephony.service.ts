@@ -1498,9 +1498,25 @@ export class TelephonyService {
     return session.recordingUrl || null;
   }
 
-  async getDashboardCalls() {
+  async getDashboardCalls(unitId?: string, user?: any) {
+    const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+    const isUnitAdmin = user?.role === 'ADMIN';
+
+    if (isUnitAdmin && unitId && unitId !== 'ALL' && unitId !== user?.unitId) {
+      throw new ForbiddenException('Forbidden: Access to requested business unit is restricted');
+    }
+
+    const effectiveUnitId = isUnitAdmin ? user?.unitId : (unitId && unitId !== 'ALL' ? unitId : undefined);
+    const unitWhere: any = effectiveUnitId ? {
+      OR: [
+        { unitId: effectiveUnitId },
+        { lead: { unitId: effectiveUnitId } },
+        { lead: { foundation: { contains: effectiveUnitId, mode: 'insensitive' } } }
+      ]
+    } : {};
+
     const allRinging = await this.prisma.callSession.findMany({
-      where: { status: 'RINGING' },
+      where: { status: 'RINGING', ...unitWhere },
       orderBy: { startedAt: 'desc' },
       include: {
         customer: { select: { name: true, phone: true } },
@@ -1508,7 +1524,7 @@ export class TelephonyService {
     });
 
     const activeCalls = await this.prisma.callSession.findMany({
-      where: { status: 'IN_PROGRESS' },
+      where: { status: 'IN_PROGRESS', ...unitWhere },
       orderBy: { startedAt: 'desc' },
       include: {
         customer: { select: { name: true, phone: true } },
@@ -1519,7 +1535,7 @@ export class TelephonyService {
     });
 
     const allMissed = await this.prisma.callSession.findMany({
-      where: { status: { in: ['MISSED', 'REJECTED'] } },
+      where: { status: { in: ['MISSED', 'REJECTED'] }, ...unitWhere },
       orderBy: { startedAt: 'desc' },
       take: 20,
       include: {
@@ -1604,7 +1620,12 @@ export class TelephonyService {
     const group = query.group || 'all';
 
     const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+    const isUnitAdmin = user?.role === 'ADMIN';
     const isElevated = isSuperAdmin || ['ADMIN', 'SUPERVISOR', 'SENIOR_MANAGER', 'DEPARTMENT_MANAGER'].includes(user?.role);
+
+    if (isUnitAdmin && query.unitId && query.unitId !== 'ALL' && query.unitId !== user?.unitId) {
+      throw new ForbiddenException('Forbidden: Access to requested business unit is restricted');
+    }
 
     const where: any = {};
 
@@ -1697,6 +1718,16 @@ export class TelephonyService {
 
     if (query.foundation) {
       where.lead = { ...where.lead, foundation: query.foundation };
+    }
+
+    const effectiveCallUnit = isUnitAdmin ? user?.unitId : (query.unitId && query.unitId !== 'ALL' ? query.unitId : null);
+    if (effectiveCallUnit) {
+      where.OR = where.OR || [];
+      where.OR.push(
+        { unitId: effectiveCallUnit },
+        { lead: { unitId: effectiveCallUnit } },
+        { lead: { foundation: { contains: effectiveCallUnit, mode: 'insensitive' } } }
+      );
     }
 
     if (query.service || query.primaryService) {

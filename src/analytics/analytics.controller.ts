@@ -396,7 +396,7 @@ export class AnalyticsController {
   private static cachedRawMetrics: { timestamp: number; data: any } | null = null;
   private static readonly CACHE_TTL_MS = 15000; // 15 seconds
 
-  private async getRawMetrics(): Promise<any> {
+  private async getRawMetrics(unitId?: string): Promise<any> {
     const now = Date.now();
     if (
       AnalyticsController.cachedRawMetrics &&

@@ -225,7 +225,31 @@ function generateEnquirySummary(lead) {
 // GET /api/v1/leads
 router.get('/', async (req, res) => {
   try {
-    const { status, agentId, assignedAgentId, service, organization, foundation, enquiryCategory, search, q, query } = req.query;
+    const { status, agentId, assignedAgentId, service, organization, foundation, enquiryCategory, search, q, query, unitId } = req.query;
+    const isSuperAdmin = req.user?.role === 'SUPER_ADMIN';
+    const isUnitAdmin = req.user?.role === 'ADMIN';
+
+    // Unit Admin Restrictions: Strictly restricted to their assigned unit
+    if (isUnitAdmin) {
+      const userUnitId = req.user?.unitId;
+      if (unitId && unitId !== 'ALL' && unitId !== userUnitId) {
+        return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
+      }
+      if (userUnitId) {
+        whereClause.unitId = userUnitId;
+      }
+    } else if (isSuperAdmin && unitId && unitId !== 'ALL') {
+      const isUuid = UUID_REGEX.test(unitId);
+      if (isUuid) {
+        whereClause.unitId = unitId;
+      } else {
+        whereClause.OR = [
+          { unit: { code: { equals: unitId, mode: 'insensitive' } } },
+          { foundation: { contains: unitId, mode: 'insensitive' } },
+          { unit: { name: { contains: unitId, mode: 'insensitive' } } }
+        ];
+      }
+    }
     const whereClause = {};
     if (status && status !== 'ALL') whereClause.status = status;
     const filterAgent = assignedAgentId || agentId;
@@ -512,6 +536,12 @@ router.get('/:id', async (req, res) => {
     });
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
+    const isSuperAdmin = req.user?.role === 'SUPER_ADMIN';
+    const isUnitAdmin = req.user?.role === 'ADMIN';
+    if (isUnitAdmin && lead.unitId && req.user?.unitId && lead.unitId !== req.user.unitId) {
+      return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
+    }
+
     const reqRole = req.user?.role;
     const reqAgentId = req.user?.agentId || req.user?.userId;
     const isElevated = reqRole && ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR', 'SENIOR_MANAGER', 'DEPARTMENT_MANAGER'].includes(reqRole);
@@ -540,6 +570,11 @@ router.put('/:id', async (req, res) => {
     
     const existing = await prisma.lead.findUnique({ where: { id: leadId } });
     if (!existing) return res.status(404).json({ error: 'Lead not found' });
+
+    const isUnitAdmin = req.user?.role === 'ADMIN';
+    if (isUnitAdmin && existing.unitId && req.user?.unitId && existing.unitId !== req.user.unitId) {
+      return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
+    }
 
     const reqRole = req.user?.role;
     const reqAgentId = req.user?.agentId || req.user?.userId;

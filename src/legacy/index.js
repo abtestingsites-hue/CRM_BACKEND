@@ -227,8 +227,22 @@ app.post('/api/v1/auth/login', async (req, res) => {
 app.get('/api/v1/conversations', requireAuth, async (req, res) => {
   try {
     const user = req.user;
+    const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+    const isUnitAdmin = user?.role === 'ADMIN';
     const isElevated = user && ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR', 'SENIOR_MANAGER', 'DEPARTMENT_MANAGER'].includes(user.role);
     const whereClause = {};
+
+    let requestedUnit = req.query.unitId;
+    if (isUnitAdmin) {
+      if (requestedUnit && requestedUnit !== 'ALL' && requestedUnit !== user.unitId) {
+        return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
+      }
+      if (user.unitId) {
+        whereClause.customer = { is: { unitId: user.unitId } };
+      }
+    } else if (isSuperAdmin && requestedUnit && requestedUnit !== 'ALL') {
+      whereClause.customer = { is: { unitId: requestedUnit } };
+    }
     if (!isElevated && user) {
       whereClause.OR = [
         { agentId: user.agentId },
@@ -1639,16 +1653,18 @@ let legacyInFlightRawMetrics = null;
 let legacyCachedRawMetrics = null;
 const ANALYTICS_CACHE_TTL = 15000; // 15 seconds
 
-const getLegacyRawMetrics = async () => {
-  const now = Date.now();
-  if (legacyCachedRawMetrics && (now - legacyCachedRawMetrics.timestamp < ANALYTICS_CACHE_TTL)) {
-    return legacyCachedRawMetrics.data;
-  }
-  if (legacyInFlightRawMetrics) {
-    return legacyInFlightRawMetrics;
+const getLegacyRawMetrics = async (unitObj = null) => {
+  if (!unitObj) {
+    const now = Date.now();
+    if (legacyCachedRawMetrics && (now - legacyCachedRawMetrics.timestamp < ANALYTICS_CACHE_TTL)) {
+      return legacyCachedRawMetrics.data;
+    }
+    if (legacyInFlightRawMetrics) {
+      return legacyInFlightRawMetrics;
+    }
   }
 
-  legacyInFlightRawMetrics = (async () => {
+  const computeMetrics = async () => {
     try {
       const [countsResult, servicesResult] = await Promise.all([
         prisma.$queryRaw`
@@ -1675,7 +1691,7 @@ const getLegacyRawMetrics = async () => {
       ]);
 
       let raw;
-      if (countsResult && countsResult.length > 0) {
+      if (!unitObj && countsResult && countsResult.length > 0) {
         const c = countsResult[0];
         raw = {
           totalCustomers: Number(c.total_customers) || 0,
@@ -1692,6 +1708,28 @@ const getLegacyRawMetrics = async () => {
           servicesCount: servicesResult || []
         };
       } else {
+        const leadWhere = unitObj ? {
+          OR: [
+            { unitId: unitObj.id },
+            { foundation: { contains: unitObj.code, mode: 'insensitive' } },
+            { unit: { code: { contains: unitObj.code, mode: 'insensitive' } } }
+          ]
+        } : {};
+
+        const callWhere = unitObj ? {
+          OR: [
+            { unitId: unitObj.id },
+            { lead: { unitId: unitObj.id } },
+            { lead: { foundation: { contains: unitObj.code, mode: 'insensitive' } } }
+          ]
+        } : {};
+
+        const agentWhere = unitObj ? {
+          OR: [
+            { department: { contains: unitObj.code, mode: 'insensitive' } }
+          ]
+        } : {};
+
         const [
           totalCustomers,
           totalLeads,
@@ -1706,16 +1744,16 @@ const getLegacyRawMetrics = async () => {
           callDurationAgg
         ] = await Promise.all([
           prisma.customer.count().catch(() => 0),
-          prisma.lead.count().catch(() => 0),
-          prisma.lead.count({ where: { status: { in: ['NEW', 'IN_PROGRESS'] } } }).catch(() => 0),
-          prisma.lead.count({ where: { status: { in: ['CONVERTED', 'POSITIVE'] } } }).catch(() => 0),
-          prisma.lead.count({ where: { sentiment: 'POSITIVE' } }).catch(() => 0),
-          prisma.callSession.count().catch(() => 0),
-          prisma.callSession.count({ where: { status: 'IN_PROGRESS' } }).catch(() => 0),
-          prisma.agent.count().catch(() => 0),
-          prisma.agent.count({ where: { status: 'AVAILABLE' } }).catch(() => 0),
+          prisma.lead.count({ where: leadWhere }).catch(() => 0),
+          prisma.lead.count({ where: { ...leadWhere, status: { in: ['NEW', 'IN_PROGRESS'] } } }).catch(() => 0),
+          prisma.lead.count({ where: { ...leadWhere, status: { in: ['CONVERTED', 'POSITIVE'] } } }).catch(() => 0),
+          prisma.lead.count({ where: { ...leadWhere, sentiment: 'POSITIVE' } }).catch(() => 0),
+          prisma.callSession.count({ where: callWhere }).catch(() => 0),
+          prisma.callSession.count({ where: { ...callWhere, status: 'IN_PROGRESS' } }).catch(() => 0),
+          prisma.agent.count({ where: agentWhere }).catch(() => 0),
+          prisma.agent.count({ where: { ...agentWhere, status: 'AVAILABLE' } }).catch(() => 0),
           prisma.queueItem.count({ where: { status: 'WAITING' } }).catch(() => 0),
-          prisma.callSession.aggregate({ _avg: { duration: true } }).catch(() => ({ _avg: { duration: 0 } }))
+          prisma.callSession.aggregate({ where: callWhere, _avg: { duration: true } }).catch(() => ({ _avg: { duration: 0 } }))
         ]);
         raw = {
           totalCustomers,
@@ -1733,23 +1771,56 @@ const getLegacyRawMetrics = async () => {
         };
       }
 
-      legacyCachedRawMetrics = {
-        timestamp: Date.now(),
-        data: raw
-      };
+      if (!unitObj) {
+        legacyCachedRawMetrics = {
+          timestamp: Date.now(),
+          data: raw
+        };
+      }
       return raw;
     } finally {
-      legacyInFlightRawMetrics = null;
+      if (!unitObj) {
+        legacyInFlightRawMetrics = null;
+      }
     }
-  })();
+  };
 
-  return legacyInFlightRawMetrics;
+  if (!unitObj) {
+    legacyInFlightRawMetrics = computeMetrics();
+    return legacyInFlightRawMetrics;
+  }
+  return computeMetrics();
 };
 
 const handleDashboardAnalytics = async (req, res) => {
   try {
-    const { type = 'overall' } = req.query;
-    const raw = await getLegacyRawMetrics();
+    const { type = 'overall', unitId } = req.query;
+    const isSuperAdmin = req.user?.role === 'SUPER_ADMIN';
+    const isUnitAdmin = req.user?.role === 'ADMIN';
+
+    let requestedUnit = unitId;
+    if (isUnitAdmin) {
+      if (requestedUnit && requestedUnit !== 'ALL' && requestedUnit !== req.user.unitId) {
+        return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
+      }
+      requestedUnit = req.user.unitId;
+    } else if (isSuperAdmin && requestedUnit === 'ALL') {
+      requestedUnit = null;
+    }
+
+    let unitObj = null;
+    if (requestedUnit) {
+      unitObj = await prisma.businessUnit.findFirst({
+        where: {
+          OR: [
+            { id: requestedUnit },
+            { code: { equals: requestedUnit, mode: 'insensitive' } }
+          ]
+        }
+      }).catch(() => null);
+    }
+
+    const raw = await getLegacyRawMetrics(unitObj);
     const {
       totalCustomers,
       totalLeads,
