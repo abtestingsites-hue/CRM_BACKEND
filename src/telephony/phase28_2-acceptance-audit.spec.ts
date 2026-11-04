@@ -173,7 +173,7 @@ async function runPhase28_2AcceptanceAudit() {
     const restoredGlobalOverview = await superAdminService.getPlatformOverview('ALL');
     assert(
       restoredGlobalOverview.status === 'OPERATIONAL' &&
-      Object.keys(restoredGlobalOverview.unitBreakdowns || {}).length >= 2 &&
+      restoredGlobalOverview.unitBreakdowns.length >= 2 &&
       allLeads.length >= Math.max(uecLeadsCount, uncfLeadsCount),
       6,
       `Returned to All Units — verified full consolidated records across all registered units (Total Leads: ${allLeads.length})`
@@ -185,9 +185,12 @@ async function runPhase28_2AcceptanceAudit() {
     const sampleCustomer = await prisma.customer.findFirst({
       include: {
         callSessions: { take: 5 },
-        notes: { take: 5 },
-        appointments: { take: 5 },
-        conversations: { take: 5 }
+        lead: {
+          include: {
+            followups: { take: 5 },
+            appointments: { take: 5 }
+          }
+        }
       }
     });
     assert(
@@ -359,4 +362,3 @@ async function runPhase28_2AcceptanceAudit() {
 }
 
 runPhase28_2AcceptanceAudit();
-

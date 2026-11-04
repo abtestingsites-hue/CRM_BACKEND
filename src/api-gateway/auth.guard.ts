@@ -1,5 +1,6 @@
-import { ForbiddenException,
-
+import {
+  ForbiddenException,
+  BadRequestException,
   Injectable,
   CanActivate,
   ExecutionContext,
@@ -13,6 +14,9 @@ import { JwtService } from '@nestjs/jwt';
 
 export const IS_PUBLIC_KEY = 'isPublic';
 export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const KNOWN_UNIT_CODES = ['UEC', 'UNCF', 'ACARE', 'IN_HOME', 'HOME_CARE'];
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -72,9 +76,40 @@ export class AuthGuard implements CanActivate {
         throw new UnauthorizedException('Token missing valid subject/userId claim');
       }
       request.user = payload;
+
+      // Multi-tenant business unit resolution and RBAC validation
+      const isSuperAdmin = payload.role === 'SUPER_ADMIN';
+      const requestedUnitId = request.query?.unitId || request.headers?.['x-crm-unit-id'] || null;
+
+      if (!isSuperAdmin) {
+        if (requestedUnitId && requestedUnitId !== 'ALL' && requestedUnitId !== payload.unitId) {
+          throw new ForbiddenException('Forbidden: Access to requested business unit is restricted');
+        }
+        if (requestedUnitId === 'ALL') {
+          throw new ForbiddenException('Forbidden: Global cross-unit view is restricted to Super Admin');
+        }
+        request.activeUnitId = payload.unitId || null;
+      } else {
+        if (requestedUnitId && requestedUnitId !== 'ALL') {
+          const isCode = KNOWN_UNIT_CODES.includes(requestedUnitId.toUpperCase()) || requestedUnitId.startsWith('TEST_UNIT_');
+          if (!UUID_REGEX.test(requestedUnitId) && !isCode) {
+            throw new BadRequestException({
+              statusCode: 400,
+              message: 'Invalid business unit identifier format. Expected valid UUID or registered unit code.',
+              error: 'Bad Request',
+            });
+          }
+          request.activeUnitId = requestedUnitId;
+        } else {
+          request.activeUnitId = null;
+        }
+      }
+
       return true;
     } catch (err) {
-      if (err instanceof UnauthorizedException) throw err;
+      if (err instanceof UnauthorizedException || err instanceof ForbiddenException || err instanceof BadRequestException) {
+        throw err;
+      }
       throw new UnauthorizedException('Invalid or expired token');
     }
   }

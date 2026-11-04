@@ -537,8 +537,7 @@ router.get('/:id', async (req, res) => {
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
     const isSuperAdmin = req.user?.role === 'SUPER_ADMIN';
-    const isUnitAdmin = req.user?.role === 'ADMIN';
-    if (isUnitAdmin && lead.unitId && req.user?.unitId && lead.unitId !== req.user.unitId) {
+    if (!isSuperAdmin && lead.unitId && req.user?.unitId && lead.unitId !== req.user.unitId) {
       return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
     }
 

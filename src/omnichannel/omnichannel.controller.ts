@@ -14,6 +14,7 @@ export class OmnichannelController {
   async getConversations(@Req() req: any) {
     this.logger.log('Fetching omnichannel conversations');
     const user = req?.user;
+
     const isElevated = user && ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR', 'SENIOR_MANAGER', 'DEPARTMENT_MANAGER'].includes(user.role);
 
     const whereClause: any = {};
@@ -84,6 +85,10 @@ export class OmnichannelController {
     }
 
     const user = req?.user;
+    const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+    if (!isSuperAdmin && user?.unitId && conversation.lead?.unitId && conversation.lead.unitId !== user.unitId) {
+      throw new ForbiddenException('Forbidden: Access to requested business unit conversation is restricted');
+    }
     const isElevated = user && ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR', 'SENIOR_MANAGER', 'DEPARTMENT_MANAGER'].includes(user.role);
     if (!isElevated && user && conversation.agentId && conversation.agentId !== user.agentId && conversation.agentId !== user.id) {
       throw new ForbiddenException('Forbidden: Not authorized to access this conversation');

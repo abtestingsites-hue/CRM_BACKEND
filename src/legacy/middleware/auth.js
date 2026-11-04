@@ -48,18 +48,32 @@ async function requireAuth(req, res, next) {
     }
     req.user = payload;
     const isSuperAdmin = payload.role === 'SUPER_ADMIN';
-    const isUnitAdmin = payload.role === 'ADMIN';
 
     const requestedUnitId = req.query?.unitId || req.headers?.['x-crm-unit-id'] || null;
-    if (isUnitAdmin) {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const KNOWN_CODES = ['UEC', 'UNCF', 'ACARE', 'IN_HOME', 'HOME_CARE'];
+
+    if (!isSuperAdmin) {
       if (requestedUnitId && requestedUnitId !== 'ALL' && requestedUnitId !== payload.unitId) {
         return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
       }
+      if (requestedUnitId === 'ALL') {
+        return res.status(403).json({ error: 'Forbidden: Global cross-unit view is restricted to Super Admin' });
+      }
       req.activeUnitId = payload.unitId || null;
-    } else if (isSuperAdmin) {
-      req.activeUnitId = (requestedUnitId && requestedUnitId !== 'ALL') ? requestedUnitId : null;
     } else {
-      req.activeUnitId = payload.unitId || null;
+      if (requestedUnitId && requestedUnitId !== 'ALL') {
+        const isCode = KNOWN_CODES.includes(requestedUnitId.toUpperCase()) || requestedUnitId.startsWith('TEST_UNIT_');
+        if (!UUID_REGEX.test(requestedUnitId) && !isCode) {
+          return res.status(400).json({
+            statusCode: 400,
+            error: 'Bad Request: Invalid business unit identifier format. Expected valid UUID or registered unit code.',
+          });
+        }
+        req.activeUnitId = requestedUnitId;
+      } else {
+        req.activeUnitId = null;
+      }
     }
     next();
   } catch (err) {
