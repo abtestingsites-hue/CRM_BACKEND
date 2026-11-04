@@ -421,6 +421,35 @@ export class SaveCallIntakeDto {
   @IsOptional()
   @IsString()
   status?: string;
+
+  // Phase 27 — Agent Feedback & Customer Disposition
+  @IsOptional()
+  @IsString()
+  interestLevel?: string;
+
+  @IsOptional()
+  @IsString()
+  customerDisposition?: string;
+
+  @IsOptional()
+  @IsString()
+  agentFeedback?: string;
+
+  @IsOptional()
+  @IsString()
+  nextAction?: string;
+
+  @IsOptional()
+  @IsString()
+  followupTime?: string;
+
+  @IsOptional()
+  @IsString()
+  followupType?: string;
+
+  @IsOptional()
+  @IsString()
+  followupNotes?: string;
 }
 
 export class SaveLiveNotesDto {

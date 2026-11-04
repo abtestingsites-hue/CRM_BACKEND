@@ -974,6 +974,19 @@ model Lead {
   omnichannelConversation     Conversation?      @relation("OmnichannelOrigin", fields: [omnichannelConversationId], references: [id], onDelete: SetNull)
   liveNotes                   Json?
 
+  // Agent Feedback & Customer Disposition (Phase 27)
+  interestLevel               String?
+  customerDisposition         String?
+  agentFeedback               String?
+  nextAction                  String?
+  followupDate                DateTime?
+  followupTime                String?
+  followupType                String?
+  followupNotes               String?
+  feedbackAgentId             String?            @db.Uuid
+  feedbackAgentName           String?
+  feedbackSubmittedAt         DateTime?
+
   // Deduplication & Safe Merge
   isMerged                    Boolean            @default(false)
   mergedIntoLeadId            String?            @db.Uuid

@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { Priority, LeadPriority, EnquiryCategory } from '@prisma/client';
+import { Priority, LeadPriority, EnquiryCategory, LeadStatus, AppointmentStatus, BookingSource, MeetingType } from '@prisma/client';
 import { INITIAL_FOUNDATIONS, CARE_CONFIG, PRIMARY_ORGANIZATIONS } from './enquiry-catalog.data';
 import {
   UpdateEnquiryClassificationDto,
@@ -658,6 +658,128 @@ export class EnquiryService {
     return orConditions;
   }
 
+  // ==========================================
+  // PHASE 27 — STATUS & CALENDAR HELPERS
+  // ==========================================
+  mapDispositionToLeadStatus(disposition?: string): LeadStatus {
+    if (!disposition) return LeadStatus.NEW;
+    const upper = disposition.toUpperCase().replace(/[\s\/-]/g, '_');
+    if (upper.includes('CONVERT') || upper === 'WON') return LeadStatus.CONVERTED;
+    if (upper.includes('CLOSED') || upper.includes('LOST') || upper === 'CLOSED_LOST') return LeadStatus.CLOSED;
+    if (upper.includes('NOT_INTERESTED') || upper.includes('UNREACHABLE') || upper.includes('NEGATIVE')) return LeadStatus.NEGATIVE;
+    if (upper.includes('FOLLOWUP') || upper.includes('FOLLOW_UP') || upper.includes('CALLBACK')) return LeadStatus.FOLLOWUP_REQUIRED;
+    if (upper.includes('INTERESTED') || upper.includes('APPOINTMENT') || upper.includes('QUALIFIED') || upper.includes('POSITIVE')) return LeadStatus.POSITIVE;
+    if (upper.includes('CONTACTED') || upper.includes('IN_PROGRESS') || upper.includes('PROPOSAL') || upper.includes('QUOTATION')) return LeadStatus.IN_PROGRESS;
+    return LeadStatus.NEW;
+  }
+
+  private async syncCalendarFollowup(
+    leadId: string,
+    customerId: string | undefined,
+    assignedAgentId: string | undefined,
+    customerName: string,
+    primaryService: string,
+    followupDateStr: string,
+    followupTimeStr: string | undefined,
+    followupType: string | undefined,
+    notes: string | undefined,
+    callSessionId: string | undefined,
+  ) {
+    try {
+      const timePart = followupTimeStr || '10:00';
+      const [hours, minutes] = timePart.split(':').map(Number);
+      const startDateTime = new Date(followupDateStr);
+      if (isNaN(startDateTime.getTime())) return null;
+
+      startDateTime.setHours(isNaN(hours) ? 10 : hours, isNaN(minutes) ? 0 : minutes, 0, 0);
+      const endDateTime = new Date(startDateTime.getTime() + 30 * 60 * 1000); // 30 mins
+      const dateOnly = new Date(startDateTime.toISOString().split('T')[0]);
+
+      let effectiveAgentId = this.isValidUuid(assignedAgentId) ? assignedAgentId : undefined;
+      if (!effectiveAgentId) {
+        const fallback = await this.prisma.agent.findFirst();
+        effectiveAgentId = fallback?.id;
+      }
+
+      // 1. Update/Create LeadFollowup
+      const existingFollowup = await this.prisma.leadFollowup.findFirst({
+        where: { leadId, status: 'PENDING' },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (existingFollowup) {
+        await this.prisma.leadFollowup.update({
+          where: { id: existingFollowup.id },
+          data: {
+            followupDate: startDateTime,
+            meetingType: (followupType === 'APPOINTMENT' || followupType === 'VISIT') ? MeetingType.APPOINTMENT : MeetingType.CALLBACK,
+            notes: notes || `Follow-up updated for ${customerName}`,
+            assignedAgentId: effectiveAgentId || existingFollowup.assignedAgentId,
+          },
+        });
+      } else if (effectiveAgentId) {
+        await this.prisma.leadFollowup.create({
+          data: {
+            leadId,
+            assignedAgentId: effectiveAgentId,
+            followupDate: startDateTime,
+            meetingType: (followupType === 'APPOINTMENT' || followupType === 'VISIT') ? MeetingType.APPOINTMENT : MeetingType.CALLBACK,
+            notes: notes || `Follow-up scheduled for ${customerName}`,
+            status: 'PENDING',
+          },
+        });
+      }
+
+      // 2. Update/Create Appointment (CRM Calendar Event)
+      const existingAppt = await this.prisma.appointment.findFirst({
+        where: { leadId, status: { notIn: [AppointmentStatus.CANCELLED, AppointmentStatus.COMPLETED] } },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const title = `Follow-up — ${customerName} — ${primaryService || 'Care Services'}`;
+
+      if (existingAppt) {
+        return await this.prisma.appointment.update({
+          where: { id: existingAppt.id },
+          data: {
+            title,
+            treatment: primaryService || existingAppt.treatment,
+            date: dateOnly,
+            startTime: startDateTime,
+            endTime: endDateTime,
+            duration: 30,
+            appointmentType: followupType || 'CALLBACK',
+            notes: notes || existingAppt.notes,
+            assignedAgentId: effectiveAgentId || existingAppt.assignedAgentId,
+          },
+        });
+      } else {
+        return await this.prisma.appointment.create({
+          data: {
+            leadId,
+            customerId: this.isValidUuid(customerId) ? customerId : undefined,
+            assignedAgentId: effectiveAgentId,
+            title,
+            treatment: primaryService || 'Care Services',
+            date: dateOnly,
+            startTime: startDateTime,
+            endTime: endDateTime,
+            duration: 30,
+            timezone: 'Asia/Kolkata',
+            status: AppointmentStatus.CONFIRMED,
+            bookingSource: BookingSource.CRM,
+            appointmentType: followupType || 'CALLBACK',
+            notes: notes || `Follow-up scheduled from Intake Form`,
+            callSessionId: this.isValidUuid(callSessionId) ? callSessionId : undefined,
+          },
+        });
+      }
+    } catch (err: any) {
+      this.logger.warn(`[CALENDAR-SYNC] Failed to synchronize calendar follow-up for lead ${leadId}: ${err.message}`);
+      return null;
+    }
+  }
+
   async saveCallIntake(callSidOrId: string, dto: SaveCallIntakeDto, user: any) {
     const fullAddress = [dto.street, dto.city, dto.state, dto.postalCode, dto.country].filter(Boolean).join(', ');
     // Locate call session by ID or reason or providerCallId
@@ -795,6 +917,10 @@ export class EnquiryService {
       ? (dto.primaryService ? `Job Enquiry: ${dto.primaryService}` : (dto.serviceCategory || 'Job Enquiry / Careers'))
       : (dto.primaryService || dto.serviceCategory || 'Care Services');
 
+    const effectiveStatus = this.mapDispositionToLeadStatus(
+      dto.customerDisposition || dto.callOutcome || dto.status || (existingLead ? existingLead.status : 'NEW')
+    );
+
     if (targetLeadId) {
       existingLead = await this.prisma.lead.findUnique({ where: { id: targetLeadId } });
     }
@@ -817,7 +943,7 @@ export class EnquiryService {
             email: dto.email || session.customer?.email || null,
             serviceInterest: resolvedServiceInterest,
             source: resolvedLeadSource,
-            status: 'NEW',
+            status: effectiveStatus,
             priority: isAmbulance ? LeadPriority.EMERGENCY : LeadPriority.NORMAL,
             foundation: dto.foundation || 'UEC',
             unitId: resolvedUnit?.id,
@@ -850,6 +976,18 @@ export class EnquiryService {
             isAmbulanceEmergency: isAmbulance,
             notes: dto.liveNotes || null,
             assignedAgentId: user?.agentId || null,
+            // Phase 27 Agent Feedback & Disposition
+            interestLevel: dto.interestLevel || null,
+            customerDisposition: dto.customerDisposition || dto.callOutcome || null,
+            agentFeedback: dto.agentFeedback || null,
+            nextAction: dto.nextAction || null,
+            followupDate: dto.followupDate ? new Date(dto.followupDate) : null,
+            followupTime: dto.followupTime || null,
+            followupType: dto.followupType || null,
+            followupNotes: dto.followupNotes || null,
+            feedbackAgentId: user?.agentId || (this.isValidUuid(user?.id) ? user.id : null),
+            feedbackAgentName: user?.name || user?.username || 'Agent',
+            feedbackSubmittedAt: (dto.customerDisposition || dto.agentFeedback) ? new Date() : null,
           },
         });
         targetLeadId = createdLead.id;
@@ -893,6 +1031,24 @@ export class EnquiryService {
 
     let updatedLead: any = null;
     if (targetLeadId) {
+      // Record LeadConversionLog if disposition/status changed
+      const actorUserId = this.isValidUuid(user?.id) ? user.id : this.isValidUuid(user?.userId) ? user.userId : undefined;
+      if (existingLead && existingLead.status !== effectiveStatus) {
+        try {
+          await this.prisma.leadConversionLog.create({
+            data: {
+              leadId: targetLeadId,
+              oldStatus: existingLead.status as any,
+              newStatus: effectiveStatus,
+              notes: dto.agentFeedback || `Status transitioned to ${effectiveStatus} via call intake disposition (${dto.customerDisposition || dto.callOutcome || 'Updated'})`,
+              agentId: this.isValidUuid(user?.agentId) ? user.agentId : undefined,
+            },
+          });
+        } catch (convErr: any) {
+          this.logger.warn(`Failed to record LeadConversionLog: ${convErr.message}`);
+        }
+      }
+
       updatedLead = await this.prisma.lead.update({
         where: { id: targetLeadId },
         data: {
@@ -931,41 +1087,53 @@ export class EnquiryService {
           isAmbulanceEmergency: isAmbulance,
           priority: isAmbulance ? LeadPriority.EMERGENCY : undefined,
           ...(dto.liveNotes ? { notes: dto.liveNotes } : {}),
+          // Phase 27 Agent Feedback & Customer Disposition
+          status: effectiveStatus,
+          ...(dto.interestLevel ? { interestLevel: dto.interestLevel } : {}),
+          ...(dto.customerDisposition ? { customerDisposition: dto.customerDisposition } : {}),
+          ...(dto.agentFeedback ? { agentFeedback: dto.agentFeedback } : {}),
+          ...(dto.nextAction ? { nextAction: dto.nextAction } : {}),
+          ...(dto.followupDate ? { followupDate: new Date(dto.followupDate) } : {}),
+          ...(dto.followupTime ? { followupTime: dto.followupTime } : {}),
+          ...(dto.followupType ? { followupType: dto.followupType } : {}),
+          ...(dto.followupNotes ? { followupNotes: dto.followupNotes } : {}),
+          ...(dto.customerDisposition || dto.agentFeedback ? {
+            feedbackAgentId: user?.agentId || (this.isValidUuid(user?.id) ? user.id : null),
+            feedbackAgentName: user?.name || user?.username || 'Agent',
+            feedbackSubmittedAt: new Date(),
+          } : {}),
         },
       });
 
-      // Schedule follow-up if requested
+      // Schedule or update CRM Calendar & Followup if requested
       if (dto.followupDate) {
-        const parsedFollowup = new Date(dto.followupDate);
-        if (!isNaN(parsedFollowup.getTime())) {
-          let agentId = user?.agentId;
-          if (!agentId) {
-            const fallbackAgent = await this.prisma.agent.findFirst();
-            agentId = fallbackAgent?.id;
-          }
+        await this.syncCalendarFollowup(
+          targetLeadId,
+          session?.customerId || undefined,
+          user?.agentId,
+          dto.enquirerName || existingLead?.customerName || 'Customer',
+          dto.primaryService || resolvedServiceInterest || 'Care Services',
+          dto.followupDate,
+          dto.followupTime,
+          dto.followupType,
+          dto.followupNotes || dto.agentFeedback || dto.liveNotes,
+          session?.id,
+        );
+      }
 
-          if (agentId) {
-            try {
-              await this.prisma.leadFollowup.create({
-                data: {
-                  leadId: targetLeadId,
-                  assignedAgentId: agentId,
-                  followupDate: parsedFollowup,
-                  meetingType: 'CALLBACK',
-                  notes: dto.liveNotes || `Call intake disposition: ${dto.callOutcome || 'Completed'}`,
-                  status: 'PENDING',
-                },
-              });
-
-              await this.prisma.lead.update({
-                where: { id: targetLeadId },
-                data: { status: 'FOLLOWUP_REQUIRED' },
-              });
-              updatedLead.status = 'FOLLOWUP_REQUIRED';
-            } catch (followupErr: any) {
-              this.logger.warn(`Failed to schedule follow-up: ${followupErr.message}`);
-            }
-          }
+      // Terminal state check: if converted or closed, cancel pending appointments and followups
+      if (effectiveStatus === LeadStatus.CONVERTED || effectiveStatus === LeadStatus.CLOSED || effectiveStatus === LeadStatus.NEGATIVE) {
+        try {
+          await this.prisma.appointment.updateMany({
+            where: { leadId: targetLeadId, status: AppointmentStatus.CONFIRMED },
+            data: { status: AppointmentStatus.CANCELLED, notes: `Cancelled due to lead transition to ${effectiveStatus}` },
+          });
+          await this.prisma.leadFollowup.updateMany({
+            where: { leadId: targetLeadId, status: 'PENDING' },
+            data: { status: 'CANCELLED', notes: `Follow-up cancelled due to lead transition to ${effectiveStatus}` },
+          });
+        } catch (cancelErr: any) {
+          this.logger.warn(`Failed to cancel follow-ups for terminal lead: ${cancelErr.message}`);
         }
       }
     }
@@ -1006,10 +1174,32 @@ export class EnquiryService {
 
     const resolvedUnit = await this.resolveUnitForFoundationAndCategory(dto.foundation, dto.enquiryCategory as string, isAmbulance);
 
+    const effectiveStatus = this.mapDispositionToLeadStatus(
+      dto.customerDisposition || dto.callOutcome || dto.status || (targetLead ? targetLead.status : 'NEW')
+    );
+
     let savedLead;
     if (targetLead) {
+      const actorUserId = this.isValidUuid(user?.id) ? user.id : this.isValidUuid(user?.userId) ? user.userId : undefined;
+
+      // Record LeadConversionLog if disposition/status changed
+      if (targetLead.status !== effectiveStatus) {
+        try {
+          await this.prisma.leadConversionLog.create({
+            data: {
+              leadId: targetLead.id,
+              oldStatus: targetLead.status as any,
+              newStatus: effectiveStatus,
+              notes: dto.agentFeedback || `Status transitioned to ${effectiveStatus} via structured enquiry disposition (${dto.customerDisposition || dto.callOutcome || 'Updated'})`,
+              agentId: this.isValidUuid(user?.agentId) ? user.agentId : undefined,
+            },
+          });
+        } catch (convErr: any) {
+          this.logger.warn(`Failed to record LeadConversionLog: ${convErr.message}`);
+        }
+      }
+
       if (resolvedUnit && targetLead.unitId && targetLead.unitId !== resolvedUnit.id) {
-        const actorUserId = this.isValidUuid(user?.id) ? user.id : this.isValidUuid(user?.userId) ? user.userId : undefined;
         const assignedAgentId = this.isValidUuid(user?.agentId) ? user.agentId : undefined;
         await this.prisma.leadTransferAudit.create({
           data: {
@@ -1046,21 +1236,45 @@ export class EnquiryService {
           subServices: dto.subServices && dto.subServices.length > 0 ? dto.subServices : targetLead.subServices,
           patientName: dto.patientName !== undefined ? dto.patientName : targetLead.patientName,
           patientAge: dto.patientAge !== undefined ? dto.patientAge : targetLead.patientAge,
+          patientWeight: dto.patientWeight !== undefined ? dto.patientWeight : targetLead.patientWeight,
+          patientWeightUnit: dto.patientWeightUnit || targetLead.patientWeightUnit || 'kg',
           patientConditions: dto.patientConditions !== undefined ? dto.patientConditions : targetLead.patientConditions,
           patientMobility: dto.patientMobility || targetLead.patientMobility,
           engagementType: dto.engagementType || targetLead.engagementType,
           careDurationCategory: dto.careDurationCategory || targetLead.careDurationCategory,
           careDuration: dto.careDuration || targetLead.careDuration,
           careSchedule: dto.careSchedule || targetLead.careSchedule,
+          secondaryPhone: dto.secondaryPhone !== undefined ? dto.secondaryPhone : targetLead.secondaryPhone,
+          secondaryCountryCode: dto.secondaryCountryCode !== undefined ? dto.secondaryCountryCode : targetLead.secondaryCountryCode,
+          street: dto.street !== undefined ? dto.street : targetLead.street,
+          city: dto.city !== undefined ? dto.city : (dto.cityDistrict !== undefined ? dto.cityDistrict : targetLead.city),
+          state: dto.state !== undefined ? dto.state : targetLead.state,
+          country: dto.country !== undefined ? dto.country : targetLead.country,
           serviceAddress: dto.serviceAddress !== undefined ? dto.serviceAddress : targetLead.serviceAddress,
-          cityDistrict: dto.cityDistrict !== undefined ? dto.cityDistrict : targetLead.cityDistrict,
+          cityDistrict: dto.cityDistrict !== undefined ? dto.cityDistrict : (dto.city !== undefined ? dto.city : targetLead.cityDistrict),
           postalCode: dto.postalCode !== undefined ? dto.postalCode : targetLead.postalCode,
+          whatsappStatus: dto.whatsappStatus || targetLead.whatsappStatus,
+          whatsappVerifiedAt: dto.whatsappStatus === 'VERIFIED' ? new Date() : targetLead.whatsappVerifiedAt,
           pickupLocation: dto.pickupLocation !== undefined ? dto.pickupLocation : targetLead.pickupLocation,
           destinationLocation: dto.destinationLocation !== undefined ? dto.destinationLocation : targetLead.destinationLocation,
           isAmbulanceEmergency: isAmbulance,
           priority: leadPriority,
           notes: dto.liveNotes !== undefined ? dto.liveNotes : targetLead.notes,
-          ...(dto.status ? { status: dto.status as any } : {}),
+          // Phase 27 Fields
+          status: effectiveStatus,
+          ...(dto.interestLevel ? { interestLevel: dto.interestLevel } : {}),
+          ...(dto.customerDisposition ? { customerDisposition: dto.customerDisposition } : {}),
+          ...(dto.agentFeedback ? { agentFeedback: dto.agentFeedback } : {}),
+          ...(dto.nextAction ? { nextAction: dto.nextAction } : {}),
+          ...(dto.followupDate ? { followupDate: new Date(dto.followupDate) } : {}),
+          ...(dto.followupTime ? { followupTime: dto.followupTime } : {}),
+          ...(dto.followupType ? { followupType: dto.followupType } : {}),
+          ...(dto.followupNotes ? { followupNotes: dto.followupNotes } : {}),
+          ...(dto.customerDisposition || dto.agentFeedback ? {
+            feedbackAgentId: user?.agentId || (this.isValidUuid(user?.id) ? user.id : targetLead.feedbackAgentId),
+            feedbackAgentName: user?.name || user?.username || targetLead.feedbackAgentName,
+            feedbackSubmittedAt: new Date(),
+          } : {}),
         },
       });
     } else {
@@ -1072,7 +1286,7 @@ export class EnquiryService {
           email: dto.email || null,
           serviceInterest: dto.primaryService || dto.serviceCategory || 'Care Services',
           source: dto.source || 'Manual Entry',
-          status: (dto.status as any) || 'NEW',
+          status: effectiveStatus,
           priority: leadPriority,
           foundation: dto.foundation || 'UEC',
           unitId: resolvedUnit?.id,
@@ -1081,47 +1295,75 @@ export class EnquiryService {
           subServices: dto.subServices || [],
           patientName: dto.patientName || null,
           patientAge: dto.patientAge ?? null,
+          patientWeight: dto.patientWeight ?? null,
+          patientWeightUnit: dto.patientWeightUnit || 'kg',
           patientConditions: dto.patientConditions || null,
           patientMobility: dto.patientMobility || null,
           engagementType: dto.engagementType || null,
           careDurationCategory: dto.careDurationCategory || null,
           careDuration: dto.careDuration || null,
           careSchedule: dto.careSchedule || null,
+          secondaryPhone: dto.secondaryPhone || null,
+          secondaryCountryCode: dto.secondaryCountryCode || null,
+          street: dto.street || null,
+          city: dto.city || dto.cityDistrict || null,
+          state: dto.state || null,
+          country: dto.country || null,
           serviceAddress: dto.serviceAddress || null,
-          cityDistrict: dto.cityDistrict || null,
+          cityDistrict: dto.cityDistrict || dto.city || null,
           postalCode: dto.postalCode || null,
+          whatsappStatus: dto.whatsappStatus || 'UNKNOWN',
+          whatsappVerifiedAt: dto.whatsappStatus === 'VERIFIED' ? new Date() : null,
           pickupLocation: dto.pickupLocation || null,
           destinationLocation: dto.destinationLocation || null,
           isAmbulanceEmergency: isAmbulance,
           notes: dto.liveNotes || null,
           assignedAgentId: user?.agentId || null,
+          // Phase 27 Agent Feedback & Disposition
+          interestLevel: dto.interestLevel || null,
+          customerDisposition: dto.customerDisposition || dto.callOutcome || null,
+          agentFeedback: dto.agentFeedback || null,
+          nextAction: dto.nextAction || null,
+          followupDate: dto.followupDate ? new Date(dto.followupDate) : null,
+          followupTime: dto.followupTime || null,
+          followupType: dto.followupType || null,
+          followupNotes: dto.followupNotes || null,
+          feedbackAgentId: user?.agentId || (this.isValidUuid(user?.id) ? user.id : null),
+          feedbackAgentName: user?.name || user?.username || 'Agent',
+          feedbackSubmittedAt: (dto.customerDisposition || dto.agentFeedback) ? new Date() : null,
         },
       });
     }
 
-    // Schedule follow-up if date is specified
+    // Schedule follow-up & sync CRM Calendar
     if (dto.followupDate) {
-      let agentId = user?.agentId;
-      if (!agentId) {
-        const fallbackAgent = await this.prisma.agent.findFirst();
-        agentId = fallbackAgent?.id;
-      }
-      if (agentId) {
-        await this.prisma.leadFollowup.create({
-          data: {
-            leadId: savedLead.id,
-            assignedAgentId: agentId,
-            followupDate: new Date(dto.followupDate),
-            meetingType: 'CALLBACK',
-            notes: dto.liveNotes || `Enquiry intake disposition: ${dto.callOutcome || 'Completed'}`,
-            status: 'PENDING',
-          },
+      await this.syncCalendarFollowup(
+        savedLead.id,
+        undefined,
+        user?.agentId,
+        dto.enquirerName || savedLead.customerName || 'Customer',
+        dto.primaryService || savedLead.serviceInterest || 'Care Services',
+        dto.followupDate,
+        dto.followupTime,
+        dto.followupType,
+        dto.followupNotes || dto.agentFeedback || dto.liveNotes,
+        undefined,
+      );
+    }
+
+    // Terminal state handling
+    if (effectiveStatus === LeadStatus.CONVERTED || effectiveStatus === LeadStatus.CLOSED || effectiveStatus === LeadStatus.NEGATIVE) {
+      try {
+        await this.prisma.appointment.updateMany({
+          where: { leadId: savedLead.id, status: AppointmentStatus.CONFIRMED },
+          data: { status: AppointmentStatus.CANCELLED, notes: `Cancelled due to lead transition to ${effectiveStatus}` },
         });
-        await this.prisma.lead.update({
-          where: { id: savedLead.id },
-          data: { status: 'FOLLOWUP_REQUIRED' },
+        await this.prisma.leadFollowup.updateMany({
+          where: { leadId: savedLead.id, status: 'PENDING' },
+          data: { status: 'CANCELLED', notes: `Follow-up cancelled due to lead transition to ${effectiveStatus}` },
         });
-        savedLead.status = 'FOLLOWUP_REQUIRED';
+      } catch (cancelErr: any) {
+        this.logger.warn(`Failed to cancel follow-ups for terminal lead: ${cancelErr.message}`);
       }
     }
 

@@ -225,21 +225,53 @@ function generateEnquirySummary(lead) {
 // GET /api/v1/leads
 router.get('/', async (req, res) => {
   try {
-    const { status, agentId, service, search, q, query } = req.query;
+    const { status, agentId, assignedAgentId, service, organization, foundation, enquiryCategory, search, q, query } = req.query;
     const whereClause = {};
-    if (status) whereClause.status = status;
-    if (agentId) whereClause.assignedAgentId = agentId;
-    if (service) whereClause.serviceInterest = service;
+    if (status && status !== 'ALL') whereClause.status = status;
+    const filterAgent = assignedAgentId || agentId;
+    if (filterAgent && filterAgent !== 'ALL') {
+      if (filterAgent === 'UNASSIGNED') {
+        whereClause.assignedAgentId = null;
+      } else {
+        whereClause.assignedAgentId = filterAgent;
+      }
+    }
+    if (service && service !== 'ALL') whereClause.serviceInterest = service;
+
+    const org = organization || foundation;
+    if (org && org !== 'ALL') {
+      whereClause.OR = [
+        { foundation: { contains: org, mode: 'insensitive' } },
+        { unit: { name: { contains: org, mode: 'insensitive' } } },
+        { unit: { code: { contains: org, mode: 'insensitive' } } },
+      ];
+    }
+
+    if (enquiryCategory && enquiryCategory !== 'ALL') {
+      whereClause.enquiryCategory = enquiryCategory;
+    }
 
     const searchTerm = search || q || query;
     if (searchTerm) {
-      whereClause.OR = [
+      const searchConditions = [
         { customerName: { contains: searchTerm, mode: 'insensitive' } },
         { phoneNumber: { contains: searchTerm } },
+        { secondaryPhone: { contains: searchTerm } },
         { email: { contains: searchTerm, mode: 'insensitive' } },
         { primaryService: { contains: searchTerm, mode: 'insensitive' } },
+        { serviceInterest: { contains: searchTerm, mode: 'insensitive' } },
         { patientName: { contains: searchTerm, mode: 'insensitive' } },
+        { foundation: { contains: searchTerm, mode: 'insensitive' } },
       ];
+      if (whereClause.OR) {
+        whereClause.AND = [
+          { OR: whereClause.OR },
+          { OR: searchConditions },
+        ];
+        delete whereClause.OR;
+      } else {
+        whereClause.OR = searchConditions;
+      }
     }
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
@@ -271,30 +303,62 @@ router.get('/', async (req, res) => {
             createdAt: true,
             assignedAgentId: true,
             foundation: true,
+            unitId: true,
+            unit: {
+              select: { id: true, name: true, code: true }
+            },
             enquiryCategory: true,
             primaryService: true,
             subServices: true,
             patientName: true,
             patientAge: true,
+            patientWeight: true,
+            patientWeightUnit: true,
             patientConditions: true,
             patientMobility: true,
             engagementType: true,
             careDurationCategory: true,
             careDuration: true,
             careSchedule: true,
+            secondaryPhone: true,
+            secondaryCountryCode: true,
+            street: true,
+            city: true,
+            state: true,
+            country: true,
             serviceAddress: true,
             cityDistrict: true,
             postalCode: true,
+            whatsappStatus: true,
+            whatsappVerifiedAt: true,
             pickupLocation: true,
             destinationLocation: true,
             notes: true,
             isAmbulanceEmergency: true,
+            // Phase 27 Agent Feedback & Disposition
+            interestLevel: true,
+            customerDisposition: true,
+            agentFeedback: true,
+            nextAction: true,
+            followupDate: true,
+            followupTime: true,
+            followupType: true,
+            followupNotes: true,
+            feedbackAgentId: true,
+            feedbackAgentName: true,
+            feedbackSubmittedAt: true,
             assignedAgent: {
-              select: { name: true }
+              select: { id: true, name: true, agentCode: true }
             },
             followups: {
-              select: { followupDate: true },
+              select: { id: true, followupDate: true, meetingType: true, notes: true, status: true },
               orderBy: { followupDate: 'asc' },
+              take: 1
+            },
+            appointments: {
+              select: { id: true, title: true, startTime: true, endTime: true, status: true, appointmentType: true, duration: true },
+              where: { status: { notIn: ['CANCELLED'] } },
+              orderBy: { startTime: 'asc' },
               take: 1
             },
             callSessions: {
@@ -339,10 +403,16 @@ router.get('/', async (req, res) => {
         }
       }
 
+      const nextFollowup = l.followupDate 
+        || (l.appointments?.[0] ? l.appointments[0].startTime : null)
+        || (l.followups?.[0] ? l.followups[0].followupDate : null);
+
       return {
         id: l.id,
         customerName: l.customerName,
         phoneNumber: phone,
+        secondaryPhone: l.secondaryPhone,
+        secondaryCountryCode: l.secondaryCountryCode,
         email: l.email,
         serviceInterest: l.serviceInterest,
         source: l.source,
@@ -352,24 +422,48 @@ router.get('/', async (req, res) => {
         createdAt: l.createdAt,
         agentName: l.assignedAgent?.name || 'Unassigned',
         assignedAgentId: l.assignedAgentId,
-        nextFollowup: l.followups[0] ? l.followups[0].followupDate : null,
+        assignedAgent: l.assignedAgent,
+        unit: l.unit,
+        unitName: l.unit?.name || null,
+        nextFollowup,
+        nextAppointment: l.appointments?.[0] || null,
         foundation: l.foundation,
         enquiryCategory: l.enquiryCategory,
         primaryService: l.primaryService,
         subServices: l.subServices || [],
         patientName: l.patientName,
         patientAge: l.patientAge,
+        patientWeight: l.patientWeight,
+        patientWeightUnit: l.patientWeightUnit || 'kg',
         patientConditions: l.patientConditions,
         patientMobility: l.patientMobility,
         engagementType: l.engagementType,
         careDurationCategory: l.careDurationCategory,
         careDuration: l.careDuration,
         careSchedule: l.careSchedule,
+        street: l.street,
+        city: l.city,
+        state: l.state,
+        country: l.country,
         serviceAddress: l.serviceAddress,
         cityDistrict: l.cityDistrict,
         postalCode: l.postalCode,
+        whatsappStatus: l.whatsappStatus,
+        whatsappVerifiedAt: l.whatsappVerifiedAt,
         notes: l.notes,
         isAmbulanceEmergency: l.isAmbulanceEmergency,
+        // Phase 27 Agent Feedback & Customer Disposition
+        interestLevel: l.interestLevel,
+        customerDisposition: l.customerDisposition,
+        agentFeedback: l.agentFeedback,
+        nextAction: l.nextAction,
+        followupDate: l.followupDate,
+        followupTime: l.followupTime,
+        followupType: l.followupType,
+        followupNotes: l.followupNotes,
+        feedbackAgentId: l.feedbackAgentId,
+        feedbackAgentName: l.feedbackAgentName,
+        feedbackSubmittedAt: l.feedbackSubmittedAt,
         enquirySummary: generateEnquirySummary(l),
         lastCall: l.callSessions?.[0] || null,
       };
@@ -390,7 +484,10 @@ router.get('/:id', async (req, res) => {
       where: { id: leadId },
       include: {
         assignedAgent: true,
+        unit: true,
         followups: { orderBy: { followupDate: 'asc' } },
+        appointments: { orderBy: { startTime: 'desc' } },
+        conversionLogs: { orderBy: { createdAt: 'desc' }, take: 10 },
       }
     });
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
