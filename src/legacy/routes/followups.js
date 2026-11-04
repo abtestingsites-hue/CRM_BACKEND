@@ -36,6 +36,28 @@ router.get('/', async (req, res) => {
 
     if (status) whereClause.status = status;
 
+    const isSuperAdmin = reqRole === 'SUPER_ADMIN';
+    const isUnitAdmin = reqRole === 'ADMIN';
+    const requestedUnit = req.query?.unitId || req.headers?.['x-crm-unit-id'] || null;
+
+    if (isUnitAdmin) {
+      if (requestedUnit && requestedUnit !== 'ALL' && requestedUnit !== req.user?.unitId) {
+        return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
+      }
+      if (req.user?.unitId) {
+        whereClause.lead = { ...whereClause.lead, unitId: req.user.unitId };
+      }
+    } else if (isSuperAdmin && requestedUnit && requestedUnit !== 'ALL') {
+      whereClause.lead = {
+        ...whereClause.lead,
+        OR: [
+          { unitId: requestedUnit },
+          { foundation: { contains: requestedUnit, mode: 'insensitive' } },
+          { unit: { code: { contains: requestedUnit, mode: 'insensitive' } } }
+        ]
+      };
+    }
+
     const followups = await prisma.leadFollowup.findMany({
       where: whereClause,
       include: {

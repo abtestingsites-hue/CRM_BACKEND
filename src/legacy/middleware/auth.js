@@ -47,6 +47,20 @@ async function requireAuth(req, res, next) {
       } catch (e) {}
     }
     req.user = payload;
+    const isSuperAdmin = payload.role === 'SUPER_ADMIN';
+    const isUnitAdmin = payload.role === 'ADMIN';
+
+    const requestedUnitId = req.query?.unitId || req.headers?.['x-crm-unit-id'] || null;
+    if (isUnitAdmin) {
+      if (requestedUnitId && requestedUnitId !== 'ALL' && requestedUnitId !== payload.unitId) {
+        return res.status(403).json({ error: 'Forbidden: Access to requested business unit is restricted' });
+      }
+      req.activeUnitId = payload.unitId || null;
+    } else if (isSuperAdmin) {
+      req.activeUnitId = (requestedUnitId && requestedUnitId !== 'ALL') ? requestedUnitId : null;
+    } else {
+      req.activeUnitId = payload.unitId || null;
+    }
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
