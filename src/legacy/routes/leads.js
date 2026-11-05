@@ -3,6 +3,7 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const Redis = require('ioredis');
 const { requireRole } = require('../middleware/auth');
+const { provisionErpDomainRecords } = require('../services/erpDomainRouting');
 
 const prisma = require('../prisma');
 const router = express.Router();
@@ -811,6 +812,14 @@ router.put('/:id/status', async (req, res) => {
           },
           include: { client: true }
         });
+
+        // Provision specific ERP domain service records (Admissions, Candidates, Donors, Ambulance Trips, Home Care Contracts)
+        await provisionErpDomainRecords(prisma, oldLead, {
+          notes,
+          targetUnitId,
+          targetTenantId,
+          client
+        });
       }
     }
     
@@ -961,6 +970,14 @@ router.post('/:id/convert', async (req, res) => {
           crmLeadId: oldLead.id
         },
         include: { client: true }
+      });
+
+      // Provision specific ERP domain service records (Admissions, Candidates, Donors, Ambulance Trips, Home Care Contracts)
+      await provisionErpDomainRecords(prisma, oldLead, {
+        notes,
+        targetUnitId,
+        targetTenantId,
+        client
       });
     }
 

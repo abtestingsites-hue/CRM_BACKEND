@@ -193,6 +193,18 @@ export class CrmErpConversionService {
       return { enquiry, updatedLead };
     });
 
+    // 9. Department-Specific ERP Provisioning
+    try {
+      await this.provisionDepartmentRecord(lead, {
+        notes,
+        targetUnitId,
+        targetTenantId,
+        client: clientRecord
+      });
+    } catch (deptErr: any) {
+      this.logger.error(`[DEPT-PROVISION-ERROR] Failed to provision ERP department domain record: ${deptErr.message}`);
+    }
+
     this.logger.log(
       `[CONVERSION-SUCCESS] CRM Lead ${leadId} successfully converted into canonical ERP Enquiry ${result.enquiry.refNo} (id=${result.enquiry.id})`,
     );
@@ -204,5 +216,227 @@ export class CrmErpConversionService {
       alreadyConverted: false,
       message: `Enquiry ${result.enquiry.refNo} generated successfully.`,
     };
+  }
+
+  /**
+   * Automatically provisions domain-specific ERP records (Admissions, Candidates, Donors, Ambulance Trips, Home Care Contracts)
+   * so they appear directly in the relevant ERP workspace registers.
+   */
+  private async provisionDepartmentRecord(lead: any, options: { notes?: string; targetUnitId: string; targetTenantId: string; client: any }): Promise<void> {
+    const { notes, targetUnitId, targetTenantId, client } = options;
+    const category = (lead.enquiryCategory || '').toUpperCase();
+    const service = (lead.primaryService || '').toLowerCase();
+    const leadName = lead.customerName || client?.name || 'Customer';
+    const leadPhone = lead.phoneNumber || client?.mobile || '9999999999';
+    const leadEmail = lead.email || client?.email || null;
+    const leadAddress = lead.serviceAddress || lead.city || client?.address || null;
+
+    // 1. HR & RECRUITMENT
+    if (category === 'JOB_ENQUIRY' || service.includes('job') || service.includes('career') || (service.includes('nurse') && service.includes('job'))) {
+      const serialNo = `CAN-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+      await (this.prisma as any).candidate.create({
+        data: {
+          id: crypto.randomUUID(),
+          serialNo,
+          name: leadName,
+          mobileNo: leadPhone,
+          preferredRole: lead.primaryService || 'Staff / Care Worker',
+          stage: 'LEAD',
+          details: {
+            email: leadEmail,
+            notes: notes || lead.notes,
+            source: lead.source || 'CRM Lead Conversion',
+            convertedFromLeadId: lead.id,
+          },
+          tenantId: targetTenantId,
+          unitId: targetUnitId,
+          updatedAt: new Date(),
+        },
+      });
+      this.logger.log(`[DEPT-PROVISION] Created ERP Candidate ${serialNo} for ${leadName}`);
+    }
+
+    // 2. DONORS & VOLUNTEERS
+    else if (category === 'DONOR_ENQUIRY' || service.includes('donor') || service.includes('donation') || service.includes('csr') || service.includes('sponsorship')) {
+      let donor = await (this.prisma as any).donor.findFirst({
+        where: { mobile: leadPhone, tenantId: targetTenantId },
+      });
+      if (!donor) {
+        const donorNo = `DNR-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+        donor = await (this.prisma as any).donor.create({
+          data: {
+            donorNo,
+            name: leadName,
+            mobile: leadPhone,
+            email: leadEmail,
+            residentialAddress: leadAddress,
+            isCorporate: service.includes('csr') || service.includes('corporate'),
+            tenantId: targetTenantId,
+            unitId: targetUnitId,
+          },
+        });
+        this.logger.log(`[DEPT-PROVISION] Created ERP Donor ${donorNo} for ${leadName}`);
+      }
+    }
+
+    // 3. AMBULANCE & EMERGENCY
+    else if (lead.isAmbulanceEmergency || service.includes('ambulance') || service.includes('emergency')) {
+      const refNo = `AMB-TRIP-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+      await (this.prisma as any).ambulanceTrip.create({
+        data: {
+          refNo,
+          clientName: leadName,
+          mobile: leadPhone,
+          pickupLocation: leadAddress || 'Dispatch Pickup Address',
+          destination: 'UEC Health Campus / Hospital',
+          priority: lead.isAmbulanceEmergency ? 'EMERGENCY' : 'URGENT',
+          status: 'REQUESTED',
+          tripNotes: `Converted from CRM Lead ${lead.id}. ${notes || lead.notes || ''}`.trim(),
+          tenantId: targetTenantId,
+          unitId: targetUnitId,
+        },
+      });
+      this.logger.log(`[DEPT-PROVISION] Created ERP Ambulance Trip ${refNo} for ${leadName}`);
+    }
+
+    // 4. HOME CARE
+    else if (service.includes('in-home') || service.includes('home care') || service.includes('visiting') || category === 'HOME_CARE') {
+      let patient = await (this.prisma as any).patient.findFirst({
+        where: { phone: leadPhone, tenantId: targetTenantId },
+      });
+      if (!patient) {
+        const elderId = `HC-ELD-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+        patient = await (this.prisma as any).patient.create({
+          data: {
+            elderId,
+            name: lead.patientName || leadName,
+            age: lead.patientAge ? parseInt(lead.patientAge, 10) : 65,
+            gender: 'Other',
+            phone: leadPhone,
+            address: leadAddress,
+            tenantId: targetTenantId,
+            unitId: targetUnitId,
+          },
+        });
+      }
+
+      let admission = await (this.prisma as any).admission.findFirst({
+        where: { patientId: patient.id, tenantId: targetTenantId },
+      });
+      if (!admission) {
+        admission = await (this.prisma as any).admission.create({
+          data: {
+            patientId: patient.id,
+            tenantId: targetTenantId,
+            unitId: targetUnitId,
+            status: 'ACTIVE',
+            admissionPriority: 'NORMAL',
+            healthCondition: 'STABLE',
+            clinicalStatus: 'AMBULATORY',
+            floor: 'Home Care',
+            room: 'Home Residence',
+            bed: 'Residence Bed',
+            admittedAt: new Date(),
+          },
+        });
+      }
+
+      const existingContract = await (this.prisma as any).serviceContract.findFirst({
+        where: { admissionId: admission.id },
+      });
+      if (!existingContract) {
+        const contractNumber = `HC-CON-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+        await (this.prisma as any).serviceContract.create({
+          data: {
+            contractNumber,
+            admissionId: admission.id,
+            tenantId: targetTenantId,
+            unitId: targetUnitId,
+            startDate: new Date(),
+            status: 'ACTIVE',
+            specialInstructions: notes || lead.notes || 'Home Care Service Contract provisioned via CRM Lead Conversion',
+            servicePrice: 15000.0,
+            billingCycle: 'MONTHLY',
+          },
+        });
+        this.logger.log(`[DEPT-PROVISION] Created Home Care Admission & Contract ${contractNumber} for ${leadName}`);
+      }
+    }
+
+    // 5. RESIDENTIAL & INPATIENT CARE (Assisted Living, Memory Care, etc.)
+    else if (
+      category === 'SERVICE_ENQUIRY' ||
+      service.includes('assisted') ||
+      service.includes('dementia') ||
+      service.includes('alzheimer') ||
+      service.includes('palliative') ||
+      service.includes('geriatric') ||
+      service.includes('residential') ||
+      service.includes('bedridden') ||
+      service.includes('post-op')
+    ) {
+      let patient = await (this.prisma as any).patient.findFirst({
+        where: { phone: leadPhone, tenantId: targetTenantId },
+      });
+      if (!patient) {
+        const elderId = `UEC-ELD-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+        patient = await (this.prisma as any).patient.create({
+          data: {
+            elderId,
+            name: lead.patientName || leadName,
+            age: lead.patientAge ? parseInt(lead.patientAge, 10) : 70,
+            gender: 'Male',
+            bloodGroup: 'O+',
+            primaryContact: `${leadName} (Primary Contact)`,
+            emergencyContact: leadPhone,
+            phone: leadPhone,
+            email: leadEmail,
+            address: leadAddress,
+            tenantId: targetTenantId,
+            unitId: targetUnitId,
+          },
+        });
+      }
+
+      let admission = await (this.prisma as any).admission.findFirst({
+        where: { patientId: patient.id, tenantId: targetTenantId },
+      });
+      if (!admission) {
+        admission = await (this.prisma as any).admission.create({
+          data: {
+            patientId: patient.id,
+            tenantId: targetTenantId,
+            unitId: targetUnitId,
+            status: 'ACTIVE',
+            admissionPriority: 'NORMAL',
+            healthCondition: 'STABLE',
+            clinicalStatus: 'AMBULATORY',
+            floor: 'Floor 1',
+            room: 'Assisted Care Suite',
+            bed: 'Bed 1',
+            admittedAt: new Date(),
+          },
+        });
+        this.logger.log(`[DEPT-PROVISION] Created Inpatient Admission for ${leadName} (Elder ID: ${patient.elderId})`);
+      }
+    }
+
+    // 6. COMPLAINTS & FEEDBACK
+    else if (category === 'COMPLAINT_OR_SUPPORT' || service.includes('complaint') || service.includes('support')) {
+      const refNo = `CMP-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+      await (this.prisma as any).complaint.create({
+        data: {
+          refNo,
+          title: `CRM Support Intake: ${leadName}`,
+          description: notes || lead.notes || 'Customer care complaint / grievance intake from CRM.',
+          status: 'OPEN',
+          priority: 'HIGH',
+          channel: 'CRM_CONVERSION',
+          tenantId: targetTenantId,
+          unitId: targetUnitId,
+        },
+      });
+      this.logger.log(`[DEPT-PROVISION] Created ERP Complaint ${refNo} for ${leadName}`);
+    }
   }
 }
