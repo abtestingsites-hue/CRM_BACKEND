@@ -9,9 +9,16 @@ export class PrismaService
   private readonly logger = new Logger(PrismaService.name);
 
   constructor() {
-    super({
+    let dbUrl = process.env.DATABASE_URL;
+    const options: any = {
       log: ['warn', 'error'],
-    });
+    };
+    if (dbUrl && dbUrl.includes('pooler.supabase.com') && !dbUrl.includes('pgbouncer=true')) {
+      const separator = dbUrl.includes('?') ? '&' : '?';
+      dbUrl = `${dbUrl}${separator}pgbouncer=true`;
+      options.datasources = { db: { url: dbUrl } };
+    }
+    super(options);
     (global as any).__prismaInstance = this;
   }
 

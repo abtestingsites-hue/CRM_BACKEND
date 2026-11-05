@@ -43,7 +43,7 @@ router.get('/', async (req, res) => {
     const [agents, onlineAgents] = await Promise.all([
       prisma.agent.findMany({
         where: { isDeleted: false },
-        include: { user: true },
+        include: { user: { include: { role: true } } },
         orderBy: { createdAt: 'desc' }
       }),
       (async () => {
@@ -86,7 +86,7 @@ router.get('/', async (req, res) => {
       }
       return {
         ...agentData,
-        role: user?.role || 'AGENT',
+        role: user?.crmRole || user?.role?.name || 'AGENT',
         email: user?.email || '',
         status: onlineAgents[effectiveUserId] || onlineAgents[a.id] || a.status || 'OFFLINE'
       };
@@ -344,7 +344,8 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
           field: 'unitId'
         });
       }
-      const unitExists = await prisma.businessUnit.findUnique({ where: { id: unitId } });
+      const unitModel = prisma.unit || prisma.businessUnit;
+      const unitExists = unitModel ? await unitModel.findUnique({ where: { id: unitId } }) : null;
       if (!unitExists) {
         return res.status(400).json({
           error: `Validation failed: Referenced business unit "${unitId}" does not exist.`,
@@ -372,7 +373,12 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
     // 6. Super Admin Constraint (409 Conflict)
     if (assignedRole === 'SUPER_ADMIN') {
       const existingSuperAdmin = await prisma.user.findFirst({
-        where: { role: 'SUPER_ADMIN' }
+        where: {
+          OR: [
+            { crmRole: 'SUPER_ADMIN' },
+            { role: { name: { in: ['Super Admin', 'SUPER_ADMIN'] } } }
+          ]
+        }
       });
       if (existingSuperAdmin) {
         return res.status(409).json({
@@ -427,7 +433,7 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
           where: { id: existingUser.id },
           data: {
             passwordHash,
-            role: assignedRole,
+            crmRole: assignedRole,
           }
         });
         return await tx.agent.update({
@@ -491,11 +497,39 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
 
     // 10. Create User and Agent in Prisma Transaction
     const newAgent = await prisma.$transaction(async (tx) => {
+      // Resolve role and tenant in canonical schema if models exist
+      let defaultTenant = null;
+      if (tx.tenant && typeof tx.tenant.findFirst === 'function') {
+        defaultTenant = await tx.tenant.findFirst().catch(() => null);
+      }
+      const roleNameMap = {
+        SUPER_ADMIN: 'Super Admin',
+        ADMIN: 'Admin',
+        SUPERVISOR: 'Supervisor',
+        AGENT: 'Agent',
+        SALES_AGENT: 'Sales Agent',
+        EMERGENCY_TEAM: 'Emergency Team'
+      };
+      const canonicalRoleName = roleNameMap[assignedRole] || 'Agent';
+      let roleRecord = null;
+      if (tx.role && typeof tx.role.findFirst === 'function') {
+        roleRecord = await tx.role.findFirst({
+          where: {
+            name: { in: [canonicalRoleName, assignedRole] },
+            ...(defaultTenant ? { tenantId: defaultTenant.id } : {})
+          }
+        }).catch(() => null);
+      }
+
       const user = await tx.user.create({
         data: {
           email: cleanEmail,
           passwordHash,
-          role: assignedRole,
+          crmRole: assignedRole,
+          roleId: roleRecord ? roleRecord.id : null,
+          tenantId: defaultTenant ? defaultTenant.id : null,
+          unitId: unitId || null,
+          isActive: true,
           authUserId
         }
       });
@@ -515,9 +549,10 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
           employeeId: cleanEmployeeId,
           department: cleanDepartment,
           status: assignedStatus,
-          joinedAt: parsedJoinedAt
+          joinedAt: parsedJoinedAt,
+          ...(defaultTenant ? { tenantId: defaultTenant.id } : {})
         },
-        include: { user: true }
+        include: { user: { include: { role: true } } }
       });
 
       if (unitId) {
@@ -577,7 +612,8 @@ router.put('/:id', async (req, res) => {
     const agentRecord = await prisma.agent.findUnique({ where: { id } });
     if (!agentRecord) return res.status(404).json({ error: 'Agent not found' });
 
-    const isElevated = currentUser && ['SUPER_ADMIN', 'ADMIN', 'HR'].includes(currentUser.role);
+    const currentRoleNorm = (currentUser?.normalizedRole || currentUser?.role || '').toUpperCase().replace(/[\s-]+/g, '_');
+    const isElevated = ['SUPER_ADMIN', 'ADMIN', 'HR'].includes(currentRoleNorm);
     const isSelf = currentUser && (currentUser.agentId === id || currentUser.userId === agentRecord.userId);
 
     if (!isElevated && !isSelf) {
@@ -594,15 +630,36 @@ router.put('/:id', async (req, res) => {
     const userUpdate = {};
     if (updateData.email) userUpdate.email = updateData.email;
     if (updateData.role) {
-      if (updateData.role === 'SUPER_ADMIN') {
+      const normTargetRole = String(updateData.role).toUpperCase().replace(/[\s-]+/g, '_');
+      if (normTargetRole === 'SUPER_ADMIN') {
         const existingSuperAdmin = await prisma.user.findFirst({
-          where: { role: 'SUPER_ADMIN' }
+          where: {
+            OR: [
+              { crmRole: 'SUPER_ADMIN' },
+              { role: { name: { in: ['Super Admin', 'SUPER_ADMIN'] } } }
+            ]
+          }
         });
         if (existingSuperAdmin && existingSuperAdmin.id !== agentRecord.userId) {
           return res.status(400).json({ error: 'Only one Super Admin slot is allowed in the system.' });
         }
       }
-      userUpdate.role = updateData.role;
+      userUpdate.crmRole = normTargetRole;
+      const roleNameMap = {
+        SUPER_ADMIN: 'Super Admin',
+        ADMIN: 'Admin',
+        SUPERVISOR: 'Supervisor',
+        AGENT: 'Agent',
+        SALES_AGENT: 'Sales Agent',
+        EMERGENCY_TEAM: 'Emergency Team'
+      };
+      const targetRoleName = roleNameMap[normTargetRole] || 'Agent';
+      const roleRecord = await prisma.role.findFirst({
+        where: { name: { in: [targetRoleName, normTargetRole] } }
+      });
+      if (roleRecord) {
+        userUpdate.roleId = roleRecord.id;
+      }
     }
     if (updateData.password) {
       userUpdate.passwordHash = await bcrypt.hash(updateData.password, 10);
@@ -625,7 +682,7 @@ router.put('/:id', async (req, res) => {
       return await tx.agent.update({
         where: { id },
         data: agentUpdate,
-        include: { user: true }
+        include: { user: { include: { role: true } } }
       });
     });
 
