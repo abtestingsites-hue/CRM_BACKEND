@@ -115,11 +115,11 @@ export class TelephonyService {
             select: { department: true }
           });
           if (agentRec?.department) {
-            const matchingUnits = await this.prisma.businessUnit.findMany({
+            const matchingUnits = await this.prisma.unit.findMany({
               where: { name: { contains: agentRec.department, mode: 'insensitive' } },
               select: { id: true }
             });
-            authorizedUnitIds.push(...matchingUnits.map(u => u.id));
+            authorizedUnitIds.push(...matchingUnits.map((u: any) => u.id));
           }
         }
       }
@@ -558,7 +558,7 @@ export class TelephonyService {
       }
     }
 
-    const targetUnit = await this.prisma.businessUnit.findFirst({
+    const targetUnit = await this.prisma.unit.findFirst({
       where: { code: targetUnitCode }
     });
 
@@ -4754,7 +4754,7 @@ export class TelephonyService {
     });
     if (!lead) throw new NotFoundException('Lead not found');
 
-    const destUnit = await this.prisma.businessUnit.findUnique({
+    const destUnit = await this.prisma.unit.findUnique({
       where: { id: destUnitId }
     });
     if (!destUnit) throw new NotFoundException('Destination business unit not found');
@@ -4818,12 +4818,12 @@ export class TelephonyService {
     const targetUnitId = body.destUnitId || lead.unitId;
     let destUnit = null;
     if (targetUnitId) {
-      destUnit = await this.prisma.businessUnit.findUnique({
+      destUnit = await this.prisma.unit.findUnique({
         where: { id: targetUnitId }
       });
     }
     if (!destUnit) {
-      destUnit = await this.prisma.businessUnit.findFirst();
+      destUnit = await this.prisma.unit.findFirst();
     }
     if (!destUnit) throw new NotFoundException('Destination unit not found');
 
@@ -5175,7 +5175,7 @@ export class TelephonyService {
         data: {
           leadId,
           sourceUnitId: lead.unitId || null,
-          destUnitId: lead.unitId || (await tx.businessUnit.findFirst())?.id!,
+          destUnitId: lead.unitId || (await tx.unit.findFirst())?.id!,
           assignedAgentId: destAgent.id,
           transferredById: actorUserId,
           status: 'COMPLETED',

@@ -381,7 +381,7 @@ export class EnquiryService {
     if (!conversation) throw new NotFoundException('Conversation not found');
 
     // Rule: Ambulance Services MUST enforce EMERGENCY priority
-    let finalPriority: Priority = dto.priority || conversation.priority;
+    let finalPriority: Priority = dto.priority || conversation.priority || Priority.NORMAL;
     const isAmbulance =
       dto.foundation === 'AMBULANCE' ||
       dto.primaryService?.toLowerCase().includes('ambulance') ||
@@ -636,7 +636,7 @@ export class EnquiryService {
       else if (fUpper.includes('HOME_CARE') || fUpper.includes('IN_HOME') || fUpper.includes('A_CARE')) targetUnitCode = 'HOME_CARE';
       else targetUnitCode = 'UEC';
     }
-    return await this.prisma.businessUnit.findFirst({
+    return await this.prisma.unit.findFirst({
       where: { code: targetUnitCode },
     });
   }
@@ -1463,7 +1463,7 @@ export class EnquiryService {
     let previousPriority: Priority = Priority.EMERGENCY;
     if (dto.conversationId) {
       const conv = await this.prisma.conversation.findUnique({ where: { id: dto.conversationId } });
-      if (conv) previousPriority = conv.priority;
+      if (conv) previousPriority = conv.priority || Priority.NORMAL;
     } else if (dto.leadId) {
       const lead = await this.prisma.lead.findUnique({ where: { id: dto.leadId } });
       if (lead) previousPriority = lead.priority as any;

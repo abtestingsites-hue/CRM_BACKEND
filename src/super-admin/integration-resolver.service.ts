@@ -82,7 +82,7 @@ export class IntegrationResolverService {
 
     let targetUnit: any = null;
     if (unitIdOrCode && unitIdOrCode !== 'ALL' && unitIdOrCode !== 'GLOBAL') {
-      targetUnit = await this.prisma.businessUnit.findFirst({
+      targetUnit = await this.prisma.unit.findFirst({
         where: {
           OR: [{ id: unitIdOrCode }, { code: unitIdOrCode }],
         },
@@ -153,3 +153,4 @@ export class IntegrationResolverService {
     };
   }
 }
+

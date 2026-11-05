@@ -56,7 +56,7 @@ export class OmnichannelController {
       lastMessage: 'Conversation active', 
       timestamp: c.updatedAt.toISOString(),
       status: c.status,
-      channel: c.channel.toLowerCase(),
+      channel: c.channel ? c.channel.toLowerCase() : "whatsapp",
       unreadCount: c.unreadCount,
       priority: c.priority,
     }));
@@ -112,7 +112,7 @@ export class OmnichannelController {
       missingInfo: conversation.missingInfo || [],
       intakeMetadata: conversation.intakeMetadata || null,
       status: conversation.status,
-      channel: conversation.channel.toLowerCase(),
+      channel: conversation.channel ? conversation.channel.toLowerCase() : "whatsapp",
       unreadCount: conversation.unreadCount,
       priority: conversation.priority,
       callSessions: conversation.callSessions,

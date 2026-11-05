@@ -205,7 +205,7 @@ export class SuperAdminService {
     // Resolve target unit if unitId provided
     let targetUnit: any = null;
     if (unitId && unitId !== 'ALL') {
-      targetUnit = await this.prisma.businessUnit.findFirst({
+      targetUnit = await this.prisma.unit.findFirst({
         where: { OR: [{ id: unitId }, { code: unitId }] },
       }).catch(() => null);
     }
@@ -229,7 +229,7 @@ export class SuperAdminService {
       allUnitsList,
     ] = await Promise.all([
       this.getActiveAgents().catch(() => ({ count: 0, breakdown: { available: 0, busy: 0, wrapUp: 0, onCall: 0 } })),
-      this.prisma.businessUnit.count().catch(() => 0),
+      this.prisma.unit.count().catch(() => 0),
       this.prisma.integrationConfiguration.count().catch(() => 0),
       this.prisma.adminAuditLog.findMany({
         take: 10,
@@ -239,7 +239,7 @@ export class SuperAdminService {
       this.prisma.callSession.count({ where: callWhere }).catch(() => 0),
       this.prisma.customer.count().catch(() => 0),
       this.prisma.appointment.count().catch(() => 0),
-      this.prisma.businessUnit.findMany({ select: { id: true, code: true, name: true } }).catch(() => []),
+      this.prisma.unit.findMany({ select: { id: true, code: true, name: true } }).catch(() => []),
     ]);
 
     // Calculate cross-unit breakdown
@@ -295,7 +295,7 @@ export class SuperAdminService {
       this.prisma.lead.count().catch(() => 0),
       this.prisma.callSession.count().catch(() => 0),
       this.prisma.conversation.count().catch(() => 0),
-      this.prisma.businessUnit.count().catch(() => 0),
+      this.prisma.unit.count().catch(() => 0),
     ]);
 
     return {
@@ -338,7 +338,7 @@ export class SuperAdminService {
     // Resolve target unit if unitId provided
     let targetUnit: any = null;
     if (unitId && unitId !== 'ALL') {
-      targetUnit = await this.prisma.businessUnit.findFirst({
+      targetUnit = await this.prisma.unit.findFirst({
         where: { OR: [{ id: unitId }, { code: unitId }] },
       }).catch(() => null);
     }
@@ -726,28 +726,28 @@ export class SuperAdminService {
     if (scopedUnitId) {
       where.OR = [{ id: scopedUnitId }, { code: scopedUnitId }];
     }
-    const units = await this.prisma.businessUnit.findMany({
+    const units = await this.prisma.unit.findMany({
       where,
       orderBy: { createdAt: 'desc' },
       include: {
         _count: {
-          select: { memberships: true, integrations: true, leads: true },
+          select: { unitMemberships: true, integrationConfigs: true, crmLeads: true },
         },
       },
     });
 
-    return units.map((u) => ({
+    return units.map((u: any) => ({
       id: u.id,
       code: u.code,
       name: u.name,
-      description: u.description,
-      status: u.status,
+      description: u.address || null,
+      status: u.status ? 'ACTIVE' : 'INACTIVE',
       isolationMode: u.isolationMode,
       enabledProducts: u.enabledProducts,
       enabledModules: u.enabledModules,
-      memberCount: u._count.memberships,
-      integrationCount: u._count.integrations,
-      leadCount: u._count.leads,
+      memberCount: u._count.unitMemberships,
+      integrationCount: u._count.integrationConfigs,
+      leadCount: u._count.crmLeads,
     }));
   }
 
@@ -764,16 +764,26 @@ export class SuperAdminService {
     }
 
     const cleanCode = dto.code.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
-    const existing = await this.prisma.businessUnit.findUnique({ where: { code: cleanCode } });
+    const existing = await this.prisma.unit.findUnique({ where: { code: cleanCode } });
     if (existing) {
       throw new ConflictException(`Business unit with code '${cleanCode}' already exists`);
     }
 
-    const unit = await this.prisma.businessUnit.create({
+    let defaultLoc = await this.prisma.location.findFirst();
+    if (!defaultLoc) {
+      defaultLoc = await this.prisma.location.create({
+        data: { name: 'Headquarters', state: 'Tamil Nadu', country: 'India', pincode: '641001' },
+      });
+    }
+
+    const defaultTenant = await this.prisma.tenant.findFirst();
+
+    const unit = await this.prisma.unit.create({
       data: {
         code: cleanCode,
         name: dto.name.trim(),
-        description: dto.description || null,
+        locationId: defaultLoc.id,
+        tenantId: defaultTenant?.id || null,
         isolationMode: dto.isolationMode === 'ISOLATED' ? 'ISOLATED' : 'SHARED',
         enabledProducts: dto.enabledProducts && dto.enabledProducts.length > 0 ? dto.enabledProducts : ['CRM'],
         enabledModules: dto.enabledModules && dto.enabledModules.length > 0 ? dto.enabledModules : ['TELEPHONY', 'OMNICHANNEL', 'LEADS', 'APPOINTMENTS', 'ANALYTICS'],
@@ -802,17 +812,16 @@ export class SuperAdminService {
     enabledProducts?: string[];
     enabledModules?: string[];
   }, actorEmail: string) {
-    const existing = await this.prisma.businessUnit.findUnique({ where: { id } });
+    const existing = await this.prisma.unit.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException('Business unit not found');
     }
 
-    const updated = await this.prisma.businessUnit.update({
+    const updated = await this.prisma.unit.update({
       where: { id },
       data: {
         name: dto.name !== undefined ? dto.name.trim() : existing.name,
-        description: dto.description !== undefined ? dto.description : existing.description,
-        status: dto.status !== undefined ? dto.status : existing.status,
+        status: dto.status !== undefined ? (dto.status === 'ACTIVE' || dto.status === true as any) : existing.status,
         isolationMode: dto.isolationMode !== undefined ? dto.isolationMode : existing.isolationMode,
         enabledProducts: dto.enabledProducts !== undefined ? dto.enabledProducts : existing.enabledProducts,
         enabledModules: dto.enabledModules !== undefined ? dto.enabledModules : existing.enabledModules,
@@ -887,13 +896,13 @@ export class SuperAdminService {
       throw new BadRequestException('destUnitId or destinationUnitId is required');
     }
 
-    const destUnit = await this.prisma.businessUnit.findUnique({
+    const destUnit = await this.prisma.unit.findUnique({
       where: { id: destUnitId },
     });
     if (!destUnit) {
       throw new NotFoundException('Destination business unit not found');
     }
-    if (destUnit.status !== 'ACTIVE') {
+    if (!destUnit.status) {
       throw new BadRequestException('Destination business unit is not active');
     }
 
@@ -1016,7 +1025,7 @@ export class SuperAdminService {
     }
     if (!userId) {
       const fallbackUser = await this.prisma.user.findFirst({
-        where: { role: 'SUPER_ADMIN' },
+        where: { OR: [{ crmRole: 'SUPER_ADMIN' }, { role: { name: 'Super Admin' } }] },
       });
       if (fallbackUser) userId = fallbackUser.id;
     }
