@@ -1351,7 +1351,73 @@ export class EnquiryService {
       );
     }
 
-    // Terminal state handling
+    // Terminal state handling & Automatic ERP Domain Record Provisioning
+    if (effectiveStatus === LeadStatus.CONVERTED) {
+      try {
+        let targetUnitId = savedLead.unitId || resolvedUnit?.id;
+        const targetTenantId = savedLead.tenantId || (await this.prisma.tenant.findFirst())?.id || 'd40f62e1-7b9f-40ad-9d79-1bc057d9be65';
+        let client = null;
+        if (cleanPhone) {
+          client = await this.prisma.client.findFirst({
+            where: { mobile: cleanPhone, ...(targetUnitId ? { unitId: targetUnitId } : {}) },
+          });
+        }
+        if (!client && dto.email) {
+          client = await this.prisma.client.findFirst({
+            where: { email: dto.email, ...(targetUnitId ? { unitId: targetUnitId } : {}) },
+          });
+        }
+        if (!client) {
+          client = await this.prisma.client.create({
+            data: {
+              refNo: `CLI-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              name: savedLead.customerName || 'CRM Customer',
+              mobile: savedLead.phoneNumber || '9999999999',
+              email: savedLead.email || null,
+              address: savedLead.serviceAddress || savedLead.city || null,
+              tenantId: targetTenantId,
+              unitId: targetUnitId,
+            },
+          });
+        }
+
+        const existingEnq = await this.prisma.enquiry.findUnique({
+          where: { crmLeadId: savedLead.id },
+        });
+        if (!existingEnq) {
+          await this.prisma.enquiry.create({
+            data: {
+              refNo: `ENQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              clientId: client.id,
+              description: savedLead.notes || savedLead.primaryService || 'Converted from CRM Lead',
+              status: 'NEW',
+              isConverted: true,
+              convertedAt: new Date(),
+              serviceRequirements: `Service: ${savedLead.primaryService || 'General Care'} | Category: ${savedLead.enquiryCategory}`,
+              summary: `Converted from CRM Lead: ${savedLead.customerName} - ${savedLead.phoneNumber}`,
+              tenantId: targetTenantId,
+              unitId: targetUnitId,
+              crmLeadId: savedLead.id,
+            },
+          });
+        }
+
+        await provisionErpDomainRecords(this.prisma, savedLead, {
+          notes: savedLead.notes,
+          targetUnitId,
+          targetTenantId,
+          client,
+        });
+
+        await this.prisma.lead.update({
+          where: { id: savedLead.id },
+          data: { clientId: client.id, tenantId: targetTenantId },
+        });
+      } catch (erpErr: any) {
+        this.logger.error(`Failed to automatically provision ERP records for converted lead: ${erpErr.message}`, erpErr.stack);
+      }
+    }
+
     if (effectiveStatus === LeadStatus.CONVERTED || effectiveStatus === LeadStatus.CLOSED || effectiveStatus === LeadStatus.NEGATIVE) {
       try {
         await this.prisma.appointment.updateMany({
