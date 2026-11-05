@@ -2219,7 +2219,12 @@ app.delete('/api/v1/automations/:id', requireAuth, async (req, res) => {
 // ==========================================
 app.get('/api/v1/departments', requireAuth, async (req, res) => {
   try {
+    const rawUnitId = req.query.unitId || req.activeUnitId;
+    const unitId = typeof rawUnitId === 'string' && rawUnitId.trim() && rawUnitId !== 'ALL' && rawUnitId !== 'all' ? rawUnitId.trim() : null;
+    const where = {};
+    if (unitId) where.unitId = unitId;
     const departments = await prisma.department.findMany({
+      where,
       include: {
         agents: { select: { id: true, name: true, status: true } }
       },

@@ -243,15 +243,49 @@ router.get('/dashboard-metrics', async (req, res) => {
 router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, res) => {
   const {
     fullName, email, password, phone, address, city, state, country, zipCode,
-    gender, dob, employeeId, department, role, status, joinedAt, unitId, departmentId,
+    gender, dob, employeeId, department, role, status, joinedAt, unitId: requestedUnitId, departmentId,
     reactivate
   } = req.body || {};
 
   try {
+    const callerRole = (req.user?.normalizedRole || req.user?.role || '').toUpperCase().replace(/[\s-]+/g, '_');
+    const isSuperAdmin = callerRole === 'SUPER_ADMIN';
+    const isAdmin = callerRole === 'ADMIN';
+
+    // Unit-aware resolution
+    let effectiveUnitId = null;
+    if (isSuperAdmin) {
+      if (!requestedUnitId || typeof requestedUnitId !== 'string' || !requestedUnitId.trim()) {
+        return res.status(400).json({
+          error: 'Validation failed: Business Unit is mandatory when creating an agent.',
+          field: 'unitId'
+        });
+      }
+      effectiveUnitId = requestedUnitId.trim();
+    } else if (isAdmin) {
+      // Unit Admin CANNOT override unitId. Strictly locked to caller's unitId.
+      effectiveUnitId = req.user.unitId;
+      if (!effectiveUnitId) {
+        return res.status(403).json({
+          error: 'Forbidden: Admin user is not assigned to a valid business unit.'
+        });
+      }
+    } else {
+      effectiveUnitId = requestedUnitId || req.user?.unitId || null;
+    }
+
     // 1. Mandatory field validations (400 Bad Request)
     if (!fullName || typeof fullName !== 'string' || fullName.trim().length < 2) {
       return res.status(400).json({
         error: 'Validation failed: Full name is required and must be at least 2 characters long.',
+        field: 'fullName'
+      });
+    }
+
+    const cleanFullName = fullName.trim();
+    if (!/^[a-zA-Z\s\.\'\-]+$/.test(cleanFullName)) {
+      return res.status(400).json({
+        error: 'Validation failed: Full name can only contain letters, spaces, hyphens, and apostrophes.',
         field: 'fullName'
       });
     }
@@ -264,7 +298,7 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
     if (!emailRegex.test(cleanEmail)) {
       return res.status(400).json({
         error: 'Validation failed: Please provide a valid email address.',
@@ -279,6 +313,73 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
       });
     }
 
+    // Phone Number Strict Validation (Phase 28.4.8 Indian Mobile Rule)
+    let cleanPhone = null;
+    if (phone !== undefined && phone !== null && String(phone).trim() !== '') {
+      let rawPhone = String(phone).trim().replace(/[\s\-\(\)]/g, '');
+      const isIndian = rawPhone.startsWith('+91') || !rawPhone.startsWith('+') || rawPhone.startsWith('91');
+      if (isIndian) {
+        if (rawPhone.startsWith('+91')) rawPhone = rawPhone.substring(3);
+        else if (rawPhone.startsWith('91') && rawPhone.length === 12) rawPhone = rawPhone.substring(2);
+        else if (rawPhone.startsWith('0') && rawPhone.length === 11) rawPhone = rawPhone.substring(1);
+
+        if (!/^\d+$/.test(rawPhone)) {
+          return res.status(400).json({
+            error: 'Validation failed: Indian mobile number must contain only numeric digits.',
+            field: 'phone'
+          });
+        }
+        if (rawPhone.length !== 10) {
+          return res.status(400).json({
+            error: `Validation failed: Indian mobile number must be exactly 10 digits (received ${rawPhone.length} digits).`,
+            field: 'phone'
+          });
+        }
+        if (!/^[6-9]/.test(rawPhone)) {
+          return res.status(400).json({
+            error: 'Validation failed: Indian mobile number must begin with 6, 7, 8, or 9.',
+            field: 'phone'
+          });
+        }
+        cleanPhone = rawPhone;
+      } else {
+        rawPhone = rawPhone.replace(/^\+/, '');
+        if (!/^\d+$/.test(rawPhone) || rawPhone.length < 7 || rawPhone.length > 15) {
+          return res.status(400).json({
+            error: 'Validation failed: Phone number must be 7-15 digits.',
+            field: 'phone'
+          });
+        }
+        cleanPhone = '+' + rawPhone;
+      }
+    }
+
+    // Postal code validation
+    let cleanZipCode = null;
+    if (zipCode !== undefined && zipCode !== null && String(zipCode).trim() !== '') {
+      const rawZip = String(zipCode).trim();
+      if (!/^[1-9][0-9]{5}$/.test(rawZip) && !/^[A-Za-z0-9\s\-]{3,10}$/.test(rawZip)) {
+        return res.status(400).json({
+          error: 'Validation failed: Invalid postal / PIN code.',
+          field: 'zipCode'
+        });
+      }
+      cleanZipCode = rawZip;
+    }
+
+    // Employee ID validation
+    let cleanEmployeeId = null;
+    if (employeeId !== undefined && employeeId !== null && String(employeeId).trim() !== '') {
+      const rawEmp = String(employeeId).trim().toUpperCase();
+      if (!/^[A-Z0-9\-_]{2,30}$/.test(rawEmp)) {
+        return res.status(400).json({
+          error: 'Validation failed: Employee ID must be 2-30 alphanumeric characters, hyphens or underscores.',
+          field: 'employeeId'
+        });
+      }
+      cleanEmployeeId = rawEmp;
+    }
+
     // 2. Validate enum fields
     const validRoles = ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR', 'AGENT', 'SALES_AGENT', 'EMERGENCY_TEAM'];
     const assignedRole = role ? String(role).trim().toUpperCase() : 'AGENT';
@@ -290,7 +391,8 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
     }
 
     const validStatuses = ['AVAILABLE', 'BUSY', 'BREAK', 'WRAP_UP', 'OFFLINE'];
-    const assignedStatus = status ? String(status).trim().toUpperCase() : 'OFFLINE';
+    let assignedStatus = status ? String(status).trim().toUpperCase() : 'OFFLINE';
+    if (assignedStatus === 'ONLINE') assignedStatus = 'AVAILABLE';
     if (!validStatuses.includes(assignedStatus)) {
       return res.status(400).json({
         error: `Validation failed: Invalid status "${status}". Allowed statuses: ${validStatuses.join(', ')}.`,
@@ -323,32 +425,28 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
       parsedJoinedAt = d;
     }
 
-    // 4. Sanitize optional unique and string fields
-    const cleanFullName = fullName.trim();
-    const cleanPhone = phone && typeof phone === 'string' && phone.trim() ? phone.trim() : null;
-    const cleanEmployeeId = employeeId && typeof employeeId === 'string' && employeeId.trim() ? employeeId.trim() : null;
+    // Sanitize optional string fields
     const cleanAddress = address && typeof address === 'string' && address.trim() ? address.trim() : null;
     const cleanCity = city && typeof city === 'string' && city.trim() ? city.trim() : null;
     const cleanState = state && typeof state === 'string' && state.trim() ? state.trim() : null;
     const cleanCountry = country && typeof country === 'string' && country.trim() ? country.trim() : null;
-    const cleanZipCode = zipCode && typeof zipCode === 'string' && zipCode.trim() ? zipCode.trim() : null;
     const cleanGender = gender && typeof gender === 'string' && gender.trim() ? gender.trim() : null;
     const cleanDepartment = department && typeof department === 'string' && department.trim() ? department.trim() : null;
 
     // 5. Foreign Key Validations
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    if (unitId) {
-      if (typeof unitId !== 'string' || !uuidRegex.test(unitId)) {
+    if (effectiveUnitId) {
+      if (typeof effectiveUnitId !== 'string' || !uuidRegex.test(effectiveUnitId)) {
         return res.status(400).json({
-          error: 'Validation failed: unitId must be a valid UUID.',
+          error: 'Validation failed: Business unit ID must be a valid UUID.',
           field: 'unitId'
         });
       }
       const unitModel = prisma.unit || prisma.businessUnit;
-      const unitExists = unitModel ? await unitModel.findUnique({ where: { id: unitId } }) : null;
+      const unitExists = unitModel ? await unitModel.findUnique({ where: { id: effectiveUnitId } }) : null;
       if (!unitExists) {
         return res.status(400).json({
-          error: `Validation failed: Referenced business unit "${unitId}" does not exist.`,
+          error: `Validation failed: Referenced business unit "${effectiveUnitId}" does not exist.`,
           field: 'unitId'
         });
       }
@@ -365,6 +463,12 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
       if (!deptExists) {
         return res.status(400).json({
           error: `Validation failed: Referenced department "${departmentId}" does not exist.`,
+          field: 'departmentId'
+        });
+      }
+      if (effectiveUnitId && deptExists.unitId && deptExists.unitId !== effectiveUnitId) {
+        return res.status(400).json({
+          error: `Validation failed: Department "${deptExists.name}" does not belong to the selected unit.`,
           field: 'departmentId'
         });
       }
@@ -434,6 +538,7 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
           data: {
             passwordHash,
             crmRole: assignedRole,
+            unitId: effectiveUnitId || existingUser.unitId || null,
           }
         });
         return await tx.agent.update({
@@ -497,7 +602,6 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
 
     // 10. Create User and Agent in Prisma Transaction
     const newAgent = await prisma.$transaction(async (tx) => {
-      // Resolve role and tenant in canonical schema if models exist
       let defaultTenant = null;
       if (tx.tenant && typeof tx.tenant.findFirst === 'function') {
         defaultTenant = await tx.tenant.findFirst().catch(() => null);
@@ -528,7 +632,7 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
           crmRole: assignedRole,
           roleId: roleRecord ? roleRecord.id : null,
           tenantId: defaultTenant ? defaultTenant.id : null,
-          unitId: unitId || null,
+          unitId: effectiveUnitId || null,
           isActive: true,
           authUserId
         }
@@ -555,14 +659,14 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
         include: { user: { include: { role: true } } }
       });
 
-      if (unitId) {
+      if (effectiveUnitId) {
         await tx.unitMembership.create({
           data: {
-            unitId,
+            unitId: effectiveUnitId,
             userId: user.id,
             roleInUnit: assignedRole === 'SUPERVISOR' ? 'SUPERVISOR' : 'MEMBER'
           }
-        });
+        }).catch(err => console.warn('[UnitMembership note]:', err.message));
       }
 
       return agent;
@@ -600,12 +704,10 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
     });
   }
 });
-
-
 // UPDATE agent (Restricted to SUPER_ADMIN, ADMIN, HR, or self-update for personal details)
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const updateData = req.body;
+  const updateData = req.body || {};
   const currentUser = req.user;
   
   try {
@@ -620,6 +722,11 @@ router.put('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden: Insufficient permissions to update this agent' });
     }
 
+    // Map status 'ONLINE' to 'AVAILABLE'
+    if (updateData.status === 'ONLINE') {
+      updateData.status = 'AVAILABLE';
+    }
+
     // Non-elevated users cannot change their role or email
     if (!isElevated) {
       delete updateData.role;
@@ -628,7 +735,7 @@ router.put('/:id', async (req, res) => {
 
     // Extract user specific fields
     const userUpdate = {};
-    if (updateData.email) userUpdate.email = updateData.email;
+    if (updateData.email) userUpdate.email = String(updateData.email).trim().toLowerCase();
     if (updateData.role) {
       const normTargetRole = String(updateData.role).toUpperCase().replace(/[\s-]+/g, '_');
       if (normTargetRole === 'SUPER_ADMIN') {
@@ -672,6 +779,20 @@ router.put('/:id', async (req, res) => {
     if (agentUpdate.dob) agentUpdate.dob = new Date(agentUpdate.dob);
     if (agentUpdate.joinedAt) agentUpdate.joinedAt = new Date(agentUpdate.joinedAt);
 
+    // Validate phone if being updated
+    if (agentUpdate.phone) {
+      let rawPhone = String(agentUpdate.phone).trim().replace(/[\s\-\(\)]/g, '');
+      const isIndian = rawPhone.startsWith('+91') || !rawPhone.startsWith('+') || rawPhone.startsWith('91');
+      if (isIndian) {
+        if (rawPhone.startsWith('+91')) rawPhone = rawPhone.substring(3);
+        else if (rawPhone.startsWith('91') && rawPhone.length === 12) rawPhone = rawPhone.substring(2);
+        else if (rawPhone.startsWith('0') && rawPhone.length === 11) rawPhone = rawPhone.substring(1);
+        if (/^\d{10}$/.test(rawPhone) && /^[6-9]/.test(rawPhone)) {
+          agentUpdate.phone = rawPhone;
+        }
+      }
+    }
+
     const updatedAgent = await prisma.$transaction(async (tx) => {
       if (Object.keys(userUpdate).length > 0) {
         await tx.user.update({
@@ -691,11 +812,10 @@ router.put('/:id', async (req, res) => {
 
     res.json({ success: true, agent: updatedAgent });
   } catch (err) {
-    console.error(err);
+    console.error('[Agents Route] Update error:', err);
     res.status(500).json({ error: 'Failed to update agent' });
   }
 });
-
 // DELETE agent (Soft Delete - Restricted to SUPER_ADMIN, ADMIN)
 router.delete('/:id', requireRole(['SUPER_ADMIN', 'ADMIN']), async (req, res) => {
   const { id } = req.params;

@@ -773,10 +773,10 @@ router.put('/:id/status', async (req, res) => {
   }
 });
 
-// POST /api/v1/leads/:id/convert
+// POST /api/v1/leads/:id/convert (Automatic ERP Enquiry Generation with Idempotency)
 router.post('/:id/convert', async (req, res) => {
   const leadId = req.params.id;
-  const { notes, appointmentDate, appointmentPurpose, sentiment: manualSentiment } = req.body;
+  const { notes, appointmentDate, appointmentPurpose, sentiment: manualSentiment } = req.body || {};
   const reqRole = req.user?.role;
   const reqAgentId = req.user?.agentId || req.user?.userId;
   const isElevated = reqRole && ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR', 'SENIOR_MANAGER', 'DEPARTMENT_MANAGER'].includes(reqRole);
@@ -799,28 +799,94 @@ router.post('/:id/convert', async (req, res) => {
       if (agentRecord) effectiveAgentId = agentRecord.id;
     }
 
-    let sentiment = 'NEUTRAL';
+    let sentiment = 'POSITIVE';
     let newStatus = 'CONVERTED';
 
     if (manualSentiment) {
       sentiment = manualSentiment;
       newStatus = manualSentiment === 'POSITIVE' || manualSentiment === 'NEGATIVE' ? 'CONVERTED' : manualSentiment;
     } else {
-      // Safe fallback sentiment analysis against null/undefined notes (DEF-23)
       const lowerNotes = (typeof notes === 'string' ? notes : (notes ? String(notes) : '')).toLowerCase();
-      const positiveWords = ['interested', 'yes', 'schedule', 'positive', 'good', 'great', 'callback', 'meet'];
       const negativeWords = ['not interested', 'no', 'negative', 'bad', 'angry', 'do not call', 'wrong number'];
-
       if (negativeWords.some(w => lowerNotes.includes(w))) {
         sentiment = 'NEGATIVE';
         newStatus = 'NEGATIVE';
-      } else if (positiveWords.some(w => lowerNotes.includes(w))) {
+      } else {
         sentiment = 'POSITIVE';
         newStatus = 'CONVERTED';
-      } else {
-        sentiment = 'NEUTRAL';
-        newStatus = 'CONVERTED';
       }
+    }
+
+    // 1. Idempotency Check: Check if an ERP Enquiry is already linked to this lead
+    let existingEnquiry = await prisma.enquiry.findUnique({
+      where: { crmLeadId: leadId },
+      include: { client: true }
+    });
+
+    let erpEnquiry = existingEnquiry;
+
+    // 2. If status is CONVERTED and no enquiry exists yet, automatically create canonical ERP Enquiry
+    if (newStatus === 'CONVERTED' && !existingEnquiry) {
+      // Resolve Target Unit
+      let targetUnitId = oldLead.unitId;
+      if (!targetUnitId) {
+        const uecUnit = await prisma.unit.findFirst({ where: { code: 'UEC', isDeleted: false } });
+        targetUnitId = uecUnit?.id || (await prisma.unit.findFirst())?.id || null;
+      }
+
+      // Resolve Tenant
+      const targetTenantId = oldLead.tenantId || (await prisma.tenant.findFirst())?.id || null;
+
+      // Find or create Client
+      let client = null;
+      if (oldLead.phoneNumber) {
+        client = await prisma.client.findFirst({
+          where: { mobile: oldLead.phoneNumber, ...(targetUnitId ? { unitId: targetUnitId } : {}) }
+        });
+      }
+      if (!client && oldLead.email) {
+        client = await prisma.client.findFirst({
+          where: { email: oldLead.email, ...(targetUnitId ? { unitId: targetUnitId } : {}) }
+        });
+      }
+      if (!client) {
+        const clientRefNo = `CLI-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        client = await prisma.client.create({
+          data: {
+            refNo: clientRefNo,
+            name: oldLead.customerName || 'CRM Customer',
+            mobile: oldLead.phoneNumber || '9999999999',
+            email: oldLead.email || null,
+            address: oldLead.serviceAddress || oldLead.city || null,
+            tenantId: targetTenantId,
+            unitId: targetUnitId
+          }
+        });
+      }
+
+      const enqRefNo = `ENQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const serviceRequirements = [
+        oldLead.primaryService ? `Service: ${oldLead.primaryService}` : null,
+        oldLead.patientName ? `Patient: ${oldLead.patientName}` : null,
+        notes ? `Notes: ${notes}` : null
+      ].filter(Boolean).join(' | ');
+
+      erpEnquiry = await prisma.enquiry.create({
+        data: {
+          refNo: enqRefNo,
+          clientId: client.id,
+          description: oldLead.notes || serviceRequirements || 'Converted from CRM Lead',
+          status: 'NEW',
+          isConverted: true,
+          convertedAt: new Date(),
+          serviceRequirements,
+          summary: `Converted from CRM Lead: ${oldLead.customerName} - ${oldLead.phoneNumber}`,
+          tenantId: targetTenantId,
+          unitId: targetUnitId,
+          crmLeadId: oldLead.id
+        },
+        include: { client: true }
+      });
     }
 
     // Update Lead
@@ -829,7 +895,8 @@ router.post('/:id/convert', async (req, res) => {
       data: { 
         status: newStatus,
         sentiment,
-        conversionScore: sentiment === 'POSITIVE' ? Math.floor(Math.random() * 20) + 80 : sentiment === 'NEGATIVE' ? Math.floor(Math.random() * 20) + 10 : 50
+        conversionScore: sentiment === 'POSITIVE' ? 90 : sentiment === 'NEGATIVE' ? 20 : 50,
+        ...(erpEnquiry?.client?.id ? { clientId: erpEnquiry.client.id } : {})
       }
     });
 
@@ -840,11 +907,11 @@ router.post('/:id/convert', async (req, res) => {
         agentId: effectiveAgentId,
         oldStatus: oldLead.status,
         newStatus,
-        notes: notes || null
+        notes: notes || 'Lead conversion with ERP Enquiry integration'
       }
     });
 
-    // If appointment date provided, schedule follow-up with safe agent resolution
+    // If appointment date provided, schedule follow-up
     if (appointmentDate) {
       let agentForFollowup = effectiveAgentId || oldLead.assignedAgentId;
       if (!agentForFollowup) {
@@ -868,9 +935,15 @@ router.post('/:id/convert', async (req, res) => {
     const io = req.app.get('io');
     if (io) io.emit('leadUpdated', updatedLead);
 
-    res.json({ success: true, lead: updatedLead, sentiment });
+    res.json({
+      success: true,
+      lead: updatedLead,
+      sentiment,
+      enquiry: erpEnquiry,
+      alreadyConverted: !!existingEnquiry
+    });
   } catch (err) {
-    console.error(err);
+    console.error('[Leads Convert Route] Error:', err);
     res.status(500).json({ error: 'Failed to convert lead' });
   }
 });
