@@ -443,7 +443,7 @@ router.post('/create', requireRole(['SUPER_ADMIN', 'ADMIN', 'HR']), async (req, 
         });
       }
       const unitModel = prisma.unit || prisma.businessUnit;
-      const unitExists = unitModel ? await unitModel.findUnique({ where: { id: effectiveUnitId } }) : null;
+      const unitExists = unitModel ? await unitModel.findFirst({ where: { id: effectiveUnitId, status: true, isDeleted: false, code: { in: ['UEC', 'UNCF', 'ACARE', 'HOME_CARE'] } } }) : null;
       if (!unitExists) {
         return res.status(400).json({
           error: `Validation failed: Referenced business unit "${effectiveUnitId}" does not exist.`,

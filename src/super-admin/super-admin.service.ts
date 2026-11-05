@@ -722,7 +722,7 @@ export class SuperAdminService {
    * Phase 5: Business Units Management
    */
   async getBusinessUnits(scopedUnitId?: string) {
-    const where: any = {};
+    const where: any = { isDeleted: false, status: true, code: { in: ['UEC', 'UNCF', 'ACARE', 'HOME_CARE'] } };
     if (scopedUnitId) {
       where.OR = [{ id: scopedUnitId }, { code: scopedUnitId }];
     }
