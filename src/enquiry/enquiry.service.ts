@@ -29,10 +29,8 @@ export class EnquiryService {
       orderBy: [{ foundationKey: 'asc' }, { sortOrder: 'asc' }],
     });
 
-    const hasUncf = items.some(i => i.foundationKey === 'UNCF');
-    const hasUecResidential = items.some(i => i.code === 'UEC_GERIATRIC_RESIDENTIAL_CARE');
-    if (items.length === 0 || !hasUncf || !hasUecResidential) {
-      this.logger.log('Updating service catalog foundations with UNCF and UEC replacement services...');
+    if (items.length === 0) {
+      this.logger.log('Service catalog empty. Seeding canonical catalog...');
       await this.seedDefaultCatalog();
       items = await this.prisma.serviceCatalogItem.findMany({
         where: {
