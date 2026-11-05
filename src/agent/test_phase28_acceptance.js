@@ -193,3 +193,4 @@ runAcceptanceTests().catch(async (e) => {
   await prisma.$disconnect();
   process.exit(1);
 });
+

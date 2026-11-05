@@ -718,10 +718,10 @@ router.post('/:id/claim', async (req, res) => {
   }
 });
 
-// PUT /api/v1/leads/:id/status
+// PUT /api/v1/leads/:id/status (with Automatic ERP Enquiry Conversion when status is CONVERTED)
 router.put('/:id/status', async (req, res) => {
   const leadId = req.params.id;
-  const { status, notes } = req.body;
+  const { status, notes } = req.body || {};
   const reqRole = req.user?.role;
   const reqAgentId = req.user?.agentId || req.user?.userId;
   const isElevated = reqRole && ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR', 'SENIOR_MANAGER', 'DEPARTMENT_MANAGER'].includes(reqRole);
@@ -743,11 +743,83 @@ router.put('/:id/status', async (req, res) => {
       });
       if (agentRecord) effectiveAgentId = agentRecord.id;
     }
+
+    // Automatic ERP Enquiry Conversion if status is CONVERTED
+    let erpEnquiry = null;
+    if (status === 'CONVERTED') {
+      const existingEnquiry = await prisma.enquiry.findUnique({
+        where: { crmLeadId: leadId },
+        include: { client: true }
+      });
+
+      if (existingEnquiry) {
+        erpEnquiry = existingEnquiry;
+      } else {
+        let targetUnitId = oldLead.unitId;
+        if (!targetUnitId) {
+          const uecUnit = await prisma.unit.findFirst({ where: { code: 'UEC', isDeleted: false } });
+          targetUnitId = uecUnit?.id || (await prisma.unit.findFirst())?.id || null;
+        }
+        const targetTenantId = oldLead.tenantId || (await prisma.tenant.findFirst())?.id || null;
+
+        let client = null;
+        if (oldLead.phoneNumber) {
+          client = await prisma.client.findFirst({
+            where: { mobile: oldLead.phoneNumber, ...(targetUnitId ? { unitId: targetUnitId } : {}) }
+          });
+        }
+        if (!client && oldLead.email) {
+          client = await prisma.client.findFirst({
+            where: { email: oldLead.email, ...(targetUnitId ? { unitId: targetUnitId } : {}) }
+          });
+        }
+        if (!client) {
+          const clientRefNo = `CLI-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+          client = await prisma.client.create({
+            data: {
+              refNo: clientRefNo,
+              name: oldLead.customerName || 'CRM Customer',
+              mobile: oldLead.phoneNumber || '9999999999',
+              email: oldLead.email || null,
+              address: oldLead.serviceAddress || oldLead.city || null,
+              tenantId: targetTenantId,
+              unitId: targetUnitId
+            }
+          });
+        }
+
+        const enqRefNo = `ENQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const serviceRequirements = [
+          oldLead.primaryService ? `Service: ${oldLead.primaryService}` : null,
+          oldLead.patientName ? `Patient: ${oldLead.patientName}` : null,
+          notes ? `Notes: ${notes}` : null
+        ].filter(Boolean).join(' | ');
+
+        erpEnquiry = await prisma.enquiry.create({
+          data: {
+            refNo: enqRefNo,
+            clientId: client.id,
+            description: oldLead.notes || serviceRequirements || 'Converted from CRM Lead',
+            status: 'NEW',
+            isConverted: true,
+            convertedAt: new Date(),
+            serviceRequirements,
+            summary: `Converted from CRM Lead: ${oldLead.customerName} - ${oldLead.phoneNumber}`,
+            tenantId: targetTenantId,
+            unitId: targetUnitId,
+            crmLeadId: oldLead.id
+          },
+          include: { client: true }
+        });
+      }
+    }
     
     const updatedLead = await prisma.lead.update({
       where: { id: leadId },
       data: { 
         status,
+        ...(status === 'CONVERTED' ? { customerDisposition: 'CONVERTED', sentiment: 'POSITIVE', conversionScore: 90 } : {}),
+        ...(erpEnquiry?.client?.id ? { clientId: erpEnquiry.client.id } : {}),
         ...(notes !== undefined ? { notes } : {})
       }
     });
@@ -766,7 +838,10 @@ router.put('/:id/status', async (req, res) => {
     const io = req.app.get('io');
     if (io) io.emit('leadUpdated', updatedLead);
 
-    res.json(updatedLead);
+    res.json({
+      ...updatedLead,
+      erpEnquiry
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to update lead status' });

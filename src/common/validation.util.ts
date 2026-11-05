@@ -203,3 +203,4 @@ export function validateNotes(text: string, maxLength = 2000): ValidationResult 
   }
   return { isValid: true, sanitizedValue: clean };
 }
+
