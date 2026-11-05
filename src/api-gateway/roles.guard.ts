@@ -31,7 +31,15 @@ export class RolesGuard implements CanActivate {
       throw new ForbiddenException('Forbidden: Missing authenticated role');
     }
 
-    const hasRole = requiredRoles.includes(user.role);
+    const normalizeRole = (role: string) =>
+      (role || '').toUpperCase().replace(/[\s-]+/g, '_');
+
+    const userNormalized = normalizeRole(user.role);
+    const hasRole = requiredRoles.some((r) => {
+      const reqNorm = normalizeRole(r);
+      return reqNorm === userNormalized || (userNormalized === 'SUPER_ADMIN' && reqNorm === 'ADMIN');
+    });
+
     if (!hasRole) {
       throw new ForbiddenException(`Forbidden: Role '${user.role}' lacks sufficient privileges for this resource`);
     }

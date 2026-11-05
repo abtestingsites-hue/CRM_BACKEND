@@ -2,7 +2,7 @@ import { Controller, Get, Post, Param, Query, Logger, Req, NotFoundException, Fo
 import { PrismaService } from '../prisma/prisma.service';
 import { AnalyticsService } from './analytics.service';
 
-@Controller(['api/v1/analytics', 'api/v1/dashboard', 'dashboard'])
+@Controller(['api/v1/analytics', 'api/v1/dashboard', 'dashboard', 'analytics'])
 export class AnalyticsController {
   private readonly logger = new Logger(AnalyticsController.name);
 

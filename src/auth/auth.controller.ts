@@ -63,7 +63,10 @@ export class AuthController {
         throw new UnauthorizedException('Invalid email or password');
       }
 
-      const resolvedRole = user.role?.name || user.crmRole || 'AGENT';
+      let resolvedRole = user.role?.name || user.crmRole || 'AGENT';
+      if (resolvedRole.toLowerCase() === 'super admin' || user.crmRole === 'SUPER_ADMIN') {
+        resolvedRole = 'SUPER_ADMIN';
+      }
 
       const payload = {
         sub: user.id,
@@ -117,7 +120,10 @@ export class AuthController {
       } catch (_) {}
     }
 
-    const resolvedRole = user?.role?.name || user?.crmRole || req.user.role || 'AGENT';
+    let resolvedRole = user?.role?.name || user?.crmRole || req.user.role || 'AGENT';
+    if (resolvedRole.toLowerCase() === 'super admin' || user?.crmRole === 'SUPER_ADMIN') {
+      resolvedRole = 'SUPER_ADMIN';
+    }
 
     return {
       userId: user ? user.id : userId,
