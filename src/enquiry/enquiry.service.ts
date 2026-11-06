@@ -1352,9 +1352,9 @@ export class EnquiryService {
     // Terminal state handling & Automatic ERP Domain Record Provisioning
     if (effectiveStatus === LeadStatus.CONVERTED) {
       try {
-        let targetUnitId = savedLead.unitId || resolvedUnit?.id;
-        const targetTenantId = savedLead.tenantId || (await this.prisma.tenant.findFirst())?.id || 'd40f62e1-7b9f-40ad-9d79-1bc057d9be65';
-        let client = null;
+        let targetUnitId: string | null = savedLead.unitId || resolvedUnit?.id || null;
+        const targetTenantId: string = savedLead.tenantId || (await this.prisma.tenant.findFirst())?.id || 'd40f62e1-7b9f-40ad-9d79-1bc057d9be65';
+        let client: any = null;
         if (cleanPhone) {
           client = await this.prisma.client.findFirst({
             where: { mobile: cleanPhone, ...(targetUnitId ? { unitId: targetUnitId } : {}) },
@@ -1374,7 +1374,7 @@ export class EnquiryService {
               email: savedLead.email || null,
               address: savedLead.serviceAddress || savedLead.city || null,
               tenantId: targetTenantId,
-              unitId: targetUnitId,
+              unitId: targetUnitId as any,
             },
           });
         }
@@ -1394,18 +1394,26 @@ export class EnquiryService {
               serviceRequirements: `Service: ${savedLead.primaryService || 'General Care'} | Category: ${savedLead.enquiryCategory}`,
               summary: `Converted from CRM Lead: ${savedLead.customerName} - ${savedLead.phoneNumber}`,
               tenantId: targetTenantId,
-              unitId: targetUnitId,
+              unitId: targetUnitId as any,
               crmLeadId: savedLead.id,
             },
           });
         }
 
-        await provisionErpDomainRecords(this.prisma, savedLead, {
-          notes: savedLead.notes,
-          targetUnitId,
-          targetTenantId,
-          client,
-        });
+        // Dynamically load legacy provisioning helper
+        try {
+          const erpModule = require('../legacy/services/erpDomainRouting');
+          if (typeof erpModule?.provisionErpDomainRecords === 'function') {
+            await erpModule.provisionErpDomainRecords(this.prisma, savedLead, {
+              notes: savedLead.notes,
+              targetUnitId,
+              targetTenantId,
+              client,
+            });
+          }
+        } catch (provErr: any) {
+          this.logger.warn(`Could not run erpDomainRouting helper: ${provErr.message}`);
+        }
 
         await this.prisma.lead.update({
           where: { id: savedLead.id },
