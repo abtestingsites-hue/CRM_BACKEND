@@ -1400,11 +1400,12 @@ export class EnquiryService {
           });
         }
 
+        let erpDomainResults: any = null;
         // Dynamically load legacy provisioning helper
         try {
           const erpModule = require('../legacy/services/erpDomainRouting');
           if (typeof erpModule?.provisionErpDomainRecords === 'function') {
-            await erpModule.provisionErpDomainRecords(this.prisma, savedLead, {
+            erpDomainResults = await erpModule.provisionErpDomainRecords(this.prisma, savedLead, {
               notes: savedLead.notes,
               targetUnitId,
               targetTenantId,
@@ -1419,6 +1420,8 @@ export class EnquiryService {
           where: { id: savedLead.id },
           data: { clientId: client.id, tenantId: targetTenantId },
         });
+        (savedLead as any).erpSynced = true;
+        (savedLead as any).erpDomainResults = erpDomainResults;
       } catch (erpErr: any) {
         this.logger.error(`Failed to automatically provision ERP records for converted lead: ${erpErr.message}`, erpErr.stack);
       }
@@ -1442,7 +1445,78 @@ export class EnquiryService {
     return {
       success: true,
       lead: savedLead,
+      erpSynced: (savedLead as any).erpSynced || false,
+      erpDomainResults: (savedLead as any).erpDomainResults || null,
       message: targetLead ? 'Enquiry updated successfully' : 'Enquiry created successfully',
+    };
+  }
+
+  // ==========================================
+  // LEAD DRAFT PERSISTENCE
+  // ==========================================
+  async saveLeadDraft(leadId: string, draftData: any, user?: any) {
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      select: { id: true, notes: true },
+    });
+    if (!lead) {
+      throw new NotFoundException(`Lead with id ${leadId} not found`);
+    }
+
+    const timestamp = new Date().toISOString();
+    const draftPayload = {
+      ...draftData,
+      updatedAt: timestamp,
+      savedBy: user?.name || user?.email || 'Agent',
+      authorId: user?.id || user?.userId,
+    };
+
+    // Store in existing callSession for the lead if available, or update lead notes/metadata
+    const session = await this.prisma.callSession.findFirst({
+      where: { leadId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (session) {
+      await this.prisma.callSession.update({
+        where: { id: session.id },
+        data: { draftNotes: draftPayload },
+      });
+    }
+
+    return {
+      success: true,
+      savedAt: timestamp,
+      leadId,
+      draft: draftPayload,
+      draftData: draftPayload,
+    };
+  }
+
+  async getLeadDraft(leadId: string) {
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        unit: true,
+        canonicalEnquiry: true,
+      },
+    });
+    if (!lead) {
+      throw new NotFoundException(`Lead with id ${leadId} not found`);
+    }
+
+    const session = await this.prisma.callSession.findFirst({
+      where: { leadId },
+      orderBy: { createdAt: 'desc' },
+      select: { draftNotes: true, intakeForm: true },
+    });
+
+    const draftContent = session?.draftNotes || session?.intakeForm || null;
+    return {
+      success: true,
+      draft: draftContent,
+      draftData: draftContent,
+      lead,
     };
   }
 

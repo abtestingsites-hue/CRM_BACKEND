@@ -159,6 +159,24 @@ export class EnquiryController {
     return await this.enquiryService.getCallDraft(callSidOrId);
   }
 
+  // 4d-2. Lead Draft Persistence (When editing lead without active call session)
+  @Patch('leads/:id/draft')
+  @Post('leads/:id/draft')
+  @Put('leads/:id/draft')
+  async saveLeadDraft(
+    @Param('id') leadId: string,
+    @Body() body: any,
+    @Req() req: any,
+  ) {
+    const draftData = body.draftData || body;
+    return await this.enquiryService.saveLeadDraft(leadId, draftData, req.user);
+  }
+
+  @Get('leads/:id/draft')
+  async getLeadDraft(@Param('id') leadId: string) {
+    return await this.enquiryService.getLeadDraft(leadId);
+  }
+
   // 4e. Phone WhatsApp Registration Status
   @Get('whatsapp-status/:phone')
   async checkWhatsAppStatus(@Param('phone') phone: string) {

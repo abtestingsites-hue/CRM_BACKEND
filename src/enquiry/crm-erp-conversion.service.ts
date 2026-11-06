@@ -1,34 +1,66 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import * as crypto from 'crypto';
 
 export interface LeadConversionResult {
   success: boolean;
   enquiry?: any;
   lead?: any;
+  domainResults?: any;
   alreadyConverted?: boolean;
   message?: string;
+}
+
+const CANONICAL_ERP_TENANT_ID = 'd40f62e1-7b9f-40ad-9d79-1bc057d9be65';
+
+function mapMobilityToClinicalStatus(mobility?: string | null): string {
+  if (!mobility) return 'AMBULATORY';
+  const m = String(mobility).toLowerCase();
+  if (m.includes('bedridden') || m.includes('bed')) return 'BEDRIDDEN';
+  if (m.includes('wheelchair')) return 'WHEELCHAIR';
+  if (m.includes('partial') || m.includes('assisted') || m.includes('cane') || m.includes('walker') || m.includes('assistance')) return 'ASSISTED';
+  return 'AMBULATORY';
+}
+
+function mapPriorityToAdmissionPriority(priority?: string | null, isAmbulanceEmergency?: boolean): string {
+  if (isAmbulanceEmergency) return 'CRITICAL';
+  if (!priority) return 'NORMAL';
+  const p = String(priority).toUpperCase();
+  if (p.includes('EMERGENCY') || p.includes('CRITICAL')) return 'CRITICAL';
+  if (p.includes('HIGH') || p.includes('URGENT')) return 'HIGH';
+  return 'NORMAL';
+}
+
+function resolveHealthCondition(lead: any): string {
+  if (lead.patientConditions && lead.patientConditions.trim()) {
+    return lead.patientConditions.trim();
+  }
+  if (lead.serviceRequirement && lead.serviceRequirement.trim()) {
+    return lead.serviceRequirement.trim();
+  }
+  if (lead.primaryService) {
+    return lead.primaryService;
+  }
+  return 'STABLE';
 }
 
 @Injectable()
 export class CrmErpConversionService {
   private readonly logger = new Logger(CrmErpConversionService.name);
 
-  // Mapping from CRM Category & Service to ERP Department Code / Name
   private readonly categoryDepartmentMap: Record<string, string> = {
     ELDERLY_CARE: 'Care Operations',
     SERVICE_ENQUIRY: 'Care Operations',
-    CARE_SERVICES: 'Care Operations',
-    MEDICAL_CARE: 'Medical Services',
-    HEALTHCARE: 'Medical Services',
-    NURSING: 'Nursing Services',
-    IN_HOME_CARE: 'In-Home Care',
-    HOME_CARE: 'In-Home Care',
-    AMBULANCE: 'Emergency Dispatch',
     JOB_ENQUIRY: 'Human Resources',
     CAREERS: 'Human Resources',
-    DONOR_ENQUIRY: 'Donor Relations',
-    VOLUNTEER_ENQUIRY: 'Community Engagement',
-    GENERAL_ADMIN: 'General Administration',
+    DONOR_ENQUIRY: 'Philanthropy & Outreach',
+    DONATIONS: 'Philanthropy & Outreach',
+    VOLUNTEER_ENQUIRY: 'Philanthropy & Outreach',
+    AMBULANCE_EMERGENCY: 'Ambulance Dispatch',
+    AMBULANCE: 'Ambulance Dispatch',
+    IN_HOME: 'Home Care Services',
+    HOME_CARE: 'Home Care Services',
+    COMPLAINT_OR_SUPPORT: 'Customer Support',
   };
 
   constructor(private readonly prisma: PrismaService) {}
@@ -47,64 +79,83 @@ export class CrmErpConversionService {
     // 1. Fetch Lead
     const lead = await this.prisma.lead.findUnique({
       where: { id: leadId },
+      include: {
+        unit: true,
+        canonicalEnquiry: true,
+      },
     });
 
     if (!lead) {
-      throw new Error(`Lead with ID ${leadId} not found.`);
+      throw new NotFoundException(`CRM Lead with id=${leadId} not found.`);
     }
 
-    // 2. Strict Idempotency Check: Query existing Enquiry linked by crmLeadId
+    // 2. Check Idempotency: Has this lead already been converted to an ERP Enquiry?
     const existingEnquiry = await this.prisma.enquiry.findUnique({
       where: { crmLeadId: leadId },
-      include: { client: true },
+      include: {
+        client: true,
+        crmLead: true,
+      },
     });
 
     if (existingEnquiry) {
       this.logger.log(
-        `[CONVERSION-IDEMPOTENT] Lead ${leadId} is already converted to ERP Enquiry ${existingEnquiry.refNo} (id=${existingEnquiry.id}). Returning existing record.`,
+        `[CONVERSION-IDEMPOTENT] Lead ${leadId} is already converted to ERP Enquiry ${existingEnquiry.refNo} (id=${existingEnquiry.id}). Syncing domain records.`,
       );
 
-      // Ensure lead status is also aligned
       if (lead.status !== 'CONVERTED') {
         await this.prisma.lead.update({
-          where: { id: leadId },
+          where: { id: lead.id },
           data: { status: 'CONVERTED' },
         });
       }
+
+      const domainResults = await this.provisionDepartmentRecord(lead, {
+        notes,
+        targetUnitId: lead.unitId || existingEnquiry.unitId || '',
+        targetTenantId: CANONICAL_ERP_TENANT_ID,
+        client: existingEnquiry.client,
+      });
 
       return {
         success: true,
         enquiry: existingEnquiry,
         lead,
+        domainResults,
         alreadyConverted: true,
-        message: 'Lead was previously converted to ERP Enquiry.',
+        message: `Lead was already converted into Enquiry ${existingEnquiry.refNo}. Domain records refreshed.`,
       };
     }
 
-    // 3. Resolve Destination Business Unit (mandatory string in schema)
+    // 3. Resolve Business Unit
     let targetUnitId = lead.unitId;
-    if (!targetUnitId) {
-      const defaultUnit = await this.prisma.unit.findFirst({
-        where: { code: 'UEC', isDeleted: false },
+    if (!targetUnitId && lead.foundation) {
+      const unit = await this.prisma.unit.findFirst({
+        where: {
+          code: {
+            equals: lead.foundation.toUpperCase(),
+            mode: 'insensitive',
+          },
+        },
       });
-      const fallbackUnit = defaultUnit || (await this.prisma.unit.findFirst());
-      targetUnitId = fallbackUnit?.id || '8497e089-ecd8-4b94-8f76-4ce8cd386a1e';
+      if (unit) targetUnitId = unit.id;
     }
 
-    // 4. Resolve Tenant (mandatory string in schema)
-    let targetTenantId = lead.tenantId;
-    if (!targetTenantId) {
-      const defaultTenant = await this.prisma.tenant.findFirst();
-      targetTenantId = defaultTenant?.id || 'd40f62e1-7b9f-40ad-9d79-1bc057d9be65';
+    if (!targetUnitId) {
+      const defaultUnit = await this.prisma.unit.findFirst();
+      targetUnitId = defaultUnit?.id || null;
     }
 
-    // 5. Resolve Client (find existing or create)
-    let clientRecord = null;
+    // 4. Resolve Canonical Tenant
+    const targetTenantId = CANONICAL_ERP_TENANT_ID;
+
+    // 5. Create or Find ERP Client record
+    let clientRecord: any = null;
     if (lead.phoneNumber) {
       clientRecord = await this.prisma.client.findFirst({
         where: {
           mobile: lead.phoneNumber,
-          unitId: targetUnitId,
+          tenantId: targetTenantId,
         },
       });
     }
@@ -113,7 +164,7 @@ export class CrmErpConversionService {
       clientRecord = await this.prisma.client.findFirst({
         where: {
           email: lead.email,
-          unitId: targetUnitId,
+          tenantId: targetTenantId,
         },
       });
     }
@@ -128,7 +179,7 @@ export class CrmErpConversionService {
           email: lead.email || null,
           address: lead.serviceAddress || lead.city || null,
           tenantId: targetTenantId,
-          unitId: targetUnitId,
+          unitId: targetUnitId as any,
         },
       });
       this.logger.log(`[CONVERSION] Created new ERP Client ${clientRecord.refNo} (id=${clientRecord.id})`);
@@ -147,7 +198,6 @@ export class CrmErpConversionService {
 
     // 8. Atomic Database Transaction: Create Enquiry + Update Lead status + Log Activity
     const result = await this.prisma.$transaction(async (tx) => {
-      // Create Enquiry with crmLeadId
       const enquiry = await tx.enquiry.create({
         data: {
           refNo: enqRefNo,
@@ -159,7 +209,7 @@ export class CrmErpConversionService {
           serviceRequirements,
           summary: `Converted by CRM Agent: ${lead.customerName} - ${lead.phoneNumber}`,
           tenantId: targetTenantId,
-          unitId: targetUnitId,
+          unitId: targetUnitId as any,
           crmLeadId: lead.id,
         },
         include: {
@@ -168,7 +218,6 @@ export class CrmErpConversionService {
         },
       });
 
-      // Update Lead to CONVERTED
       const updatedLead = await tx.lead.update({
         where: { id: lead.id },
         data: {
@@ -176,10 +225,10 @@ export class CrmErpConversionService {
           sentiment: sentiment || 'POSITIVE',
           conversionScore: 90,
           clientId: clientRecord.id,
+          tenantId: targetTenantId,
         },
       });
 
-      // Log Conversion in LeadConversionLog
       await tx.leadConversionLog.create({
         data: {
           leadId: lead.id,
@@ -194,12 +243,13 @@ export class CrmErpConversionService {
     });
 
     // 9. Department-Specific ERP Provisioning
+    let domainResults: any = null;
     try {
-      await this.provisionDepartmentRecord(lead, {
+      domainResults = await this.provisionDepartmentRecord(lead, {
         notes,
-        targetUnitId,
+        targetUnitId: targetUnitId || '',
         targetTenantId,
-        client: clientRecord
+        client: clientRecord,
       });
     } catch (deptErr: any) {
       this.logger.error(`[DEPT-PROVISION-ERROR] Failed to provision ERP department domain record: ${deptErr.message}`);
@@ -213,17 +263,20 @@ export class CrmErpConversionService {
       success: true,
       enquiry: result.enquiry,
       lead: result.updatedLead,
+      domainResults,
       alreadyConverted: false,
       message: `Enquiry ${result.enquiry.refNo} generated successfully.`,
     };
   }
 
   /**
-   * Automatically provisions domain-specific ERP records (Admissions, Candidates, Donors, Ambulance Trips, Home Care Contracts)
+   * Automatically provisions or updates domain-specific ERP records (Admissions, Candidates, Donors, Ambulance Trips, Home Care Contracts)
    * so they appear directly in the relevant ERP workspace registers.
    */
-  private async provisionDepartmentRecord(lead: any, options: { notes?: string; targetUnitId: string; targetTenantId: string; client: any }): Promise<void> {
-    const { notes, targetUnitId, targetTenantId, client } = options;
+  async provisionDepartmentRecord(lead: any, options: { notes?: string; targetUnitId: string; targetTenantId: string; client: any }): Promise<any> {
+    const { notes, targetUnitId, client } = options;
+    const targetTenantId = CANONICAL_ERP_TENANT_ID;
+
     const category = (lead.enquiryCategory || '').toUpperCase();
     const service = (lead.primaryService || '').toLowerCase();
     const leadName = lead.customerName || client?.name || 'Customer';
@@ -231,10 +284,23 @@ export class CrmErpConversionService {
     const leadEmail = lead.email || client?.email || null;
     const leadAddress = lead.serviceAddress || lead.city || client?.address || null;
 
+    const patientName = lead.patientName || leadName;
+    const patientAge = lead.patientAge ? parseInt(lead.patientAge, 10) : 70;
+    const clinicalStatus = mapMobilityToClinicalStatus(lead.patientMobility);
+    const healthCondition = resolveHealthCondition(lead);
+    const admissionPriority = mapPriorityToAdmissionPriority(lead.priority || lead.callbackPriority, lead.isAmbulanceEmergency);
+
+    const domainResults = {
+      domain: 'ENQUIRY_ONLY',
+      recordsCreated: [] as any[],
+      recordsUpdated: [] as any[],
+    };
+
     // 1. HR & RECRUITMENT
     if (category === 'JOB_ENQUIRY' || service.includes('job') || service.includes('career') || (service.includes('nurse') && service.includes('job'))) {
+      domainResults.domain = 'HR_RECRUITMENT';
       const serialNo = `CAN-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
-      await (this.prisma as any).candidate.create({
+      const candidate = await (this.prisma as any).candidate.create({
         data: {
           id: crypto.randomUUID(),
           serialNo,
@@ -253,11 +319,13 @@ export class CrmErpConversionService {
           updatedAt: new Date(),
         },
       });
+      domainResults.recordsCreated.push({ type: 'Candidate', id: candidate.id, ref: candidate.serialNo });
       this.logger.log(`[DEPT-PROVISION] Created ERP Candidate ${serialNo} for ${leadName}`);
     }
 
     // 2. DONORS & VOLUNTEERS
     else if (category === 'DONOR_ENQUIRY' || service.includes('donor') || service.includes('donation') || service.includes('csr') || service.includes('sponsorship')) {
+      domainResults.domain = 'DONORS_VOLUNTEERS';
       let donor = await (this.prisma as any).donor.findFirst({
         where: { mobile: leadPhone, tenantId: targetTenantId },
       });
@@ -275,20 +343,24 @@ export class CrmErpConversionService {
             unitId: targetUnitId,
           },
         });
+        domainResults.recordsCreated.push({ type: 'Donor', id: donor.id, ref: donor.donorNo });
         this.logger.log(`[DEPT-PROVISION] Created ERP Donor ${donorNo} for ${leadName}`);
+      } else {
+        domainResults.recordsUpdated.push({ type: 'Donor', id: donor.id, ref: donor.donorNo });
       }
     }
 
     // 3. AMBULANCE & EMERGENCY
     else if (lead.isAmbulanceEmergency || service.includes('ambulance') || service.includes('emergency')) {
+      domainResults.domain = 'AMBULANCE';
       const refNo = `AMB-TRIP-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
-      await (this.prisma as any).ambulanceTrip.create({
+      const trip = await (this.prisma as any).ambulanceTrip.create({
         data: {
           refNo,
           clientName: leadName,
           mobile: leadPhone,
-          pickupLocation: leadAddress || 'Dispatch Pickup Address',
-          destination: 'UEC Health Campus / Hospital',
+          pickupLocation: leadAddress || lead.pickupLocation || 'Dispatch Pickup Address',
+          destination: lead.destinationLocation || 'UEC Health Campus / Hospital',
           priority: lead.isAmbulanceEmergency ? 'EMERGENCY' : 'URGENT',
           status: 'REQUESTED',
           tripNotes: `Converted from CRM Lead ${lead.id}. ${notes || lead.notes || ''}`.trim(),
@@ -296,33 +368,57 @@ export class CrmErpConversionService {
           unitId: targetUnitId,
         },
       });
+      domainResults.recordsCreated.push({ type: 'AmbulanceTrip', id: trip.id, ref: trip.refNo });
       this.logger.log(`[DEPT-PROVISION] Created ERP Ambulance Trip ${refNo} for ${leadName}`);
     }
 
     // 4. HOME CARE
     else if (service.includes('in-home') || service.includes('home care') || service.includes('visiting') || category === 'HOME_CARE') {
+      domainResults.domain = 'HOME_CARE';
       let patient = await (this.prisma as any).patient.findFirst({
-        where: { phone: leadPhone, tenantId: targetTenantId },
+        where: {
+          OR: [{ phone: leadPhone }, { emergencyContact: leadPhone }],
+          tenantId: targetTenantId,
+        },
       });
+
       if (!patient) {
         const elderId = `HC-ELD-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
         patient = await (this.prisma as any).patient.create({
           data: {
             elderId,
-            name: lead.patientName || leadName,
-            age: lead.patientAge ? parseInt(lead.patientAge, 10) : 65,
+            name: patientName,
+            age: patientAge,
             gender: 'Other',
             phone: leadPhone,
+            emergencyContact: leadPhone,
+            primaryContact: `${leadName} (Primary Contact)`,
+            email: leadEmail,
             address: leadAddress,
             tenantId: targetTenantId,
             unitId: targetUnitId,
           },
         });
+        domainResults.recordsCreated.push({ type: 'Patient', id: patient.id, elderId: patient.elderId });
+      } else {
+        patient = await (this.prisma as any).patient.update({
+          where: { id: patient.id },
+          data: {
+            name: patientName,
+            age: patientAge,
+            primaryContact: `${leadName} (Primary Contact)`,
+            email: leadEmail || patient.email,
+            address: leadAddress || patient.address,
+            unitId: targetUnitId || patient.unitId,
+          },
+        });
+        domainResults.recordsUpdated.push({ type: 'Patient', id: patient.id, elderId: patient.elderId });
       }
 
       let admission = await (this.prisma as any).admission.findFirst({
         where: { patientId: patient.id, tenantId: targetTenantId },
       });
+
       if (!admission) {
         admission = await (this.prisma as any).admission.create({
           data: {
@@ -330,15 +426,29 @@ export class CrmErpConversionService {
             tenantId: targetTenantId,
             unitId: targetUnitId,
             status: 'ACTIVE',
-            admissionPriority: 'NORMAL',
-            healthCondition: 'STABLE',
-            clinicalStatus: 'AMBULATORY',
+            admissionPriority,
+            healthCondition,
+            clinicalStatus,
             floor: 'Home Care',
             room: 'Home Residence',
             bed: 'Residence Bed',
             admittedAt: new Date(),
           },
         });
+        domainResults.recordsCreated.push({ type: 'Admission', id: admission.id, patient: patient.name });
+      } else {
+        admission = await (this.prisma as any).admission.update({
+          where: { id: admission.id },
+          data: {
+            healthCondition,
+            clinicalStatus,
+            admissionPriority,
+            status: 'ACTIVE',
+            unitId: targetUnitId || admission.unitId,
+            updatedAt: new Date(),
+          },
+        });
+        domainResults.recordsUpdated.push({ type: 'Admission', id: admission.id, patient: patient.name });
       }
 
       const existingContract = await (this.prisma as any).serviceContract.findFirst({
@@ -354,7 +464,7 @@ export class CrmErpConversionService {
             unitId: targetUnitId,
             startDate: new Date(),
             status: 'ACTIVE',
-            specialInstructions: notes || lead.notes || 'Home Care Service Contract provisioned via CRM Lead Conversion',
+            specialInstructions: notes || lead.notes || `Schedule: ${lead.careSchedule || 'Daily'}. Duration: ${lead.careDuration || 'Ongoing'}. Conditions: ${lead.patientConditions || 'Standard Care'}`,
             servicePrice: 15000.0,
             billingCycle: 'MONTHLY',
           },
@@ -363,28 +473,35 @@ export class CrmErpConversionService {
       }
     }
 
-    // 5. RESIDENTIAL & INPATIENT CARE (Assisted Living, Memory Care, etc.)
+    // 5. RESIDENTIAL & INPATIENT CARE
     else if (
       category === 'SERVICE_ENQUIRY' ||
       service.includes('assisted') ||
+      service.includes('nursing') ||
       service.includes('dementia') ||
       service.includes('alzheimer') ||
       service.includes('palliative') ||
       service.includes('geriatric') ||
       service.includes('residential') ||
       service.includes('bedridden') ||
-      service.includes('post-op')
+      service.includes('post-op') ||
+      service.includes('elderly')
     ) {
+      domainResults.domain = 'ADMISSIONS_REGISTER';
       let patient = await (this.prisma as any).patient.findFirst({
-        where: { phone: leadPhone, tenantId: targetTenantId },
+        where: {
+          OR: [{ phone: leadPhone }, { emergencyContact: leadPhone }],
+          tenantId: targetTenantId,
+        },
       });
+
       if (!patient) {
         const elderId = `UEC-ELD-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
         patient = await (this.prisma as any).patient.create({
           data: {
             elderId,
-            name: lead.patientName || leadName,
-            age: lead.patientAge ? parseInt(lead.patientAge, 10) : 70,
+            name: patientName,
+            age: patientAge,
             gender: 'Male',
             bloodGroup: 'O+',
             primaryContact: `${leadName} (Primary Contact)`,
@@ -396,11 +513,32 @@ export class CrmErpConversionService {
             unitId: targetUnitId,
           },
         });
+        domainResults.recordsCreated.push({ type: 'Patient', id: patient.id, elderId: patient.elderId });
+      } else {
+        patient = await (this.prisma as any).patient.update({
+          where: { id: patient.id },
+          data: {
+            name: patientName,
+            age: patientAge,
+            primaryContact: `${leadName} (Primary Contact)`,
+            email: leadEmail || patient.email,
+            address: leadAddress || patient.address,
+            unitId: targetUnitId || patient.unitId,
+          },
+        });
+        domainResults.recordsUpdated.push({ type: 'Patient', id: patient.id, elderId: patient.elderId });
       }
 
       let admission = await (this.prisma as any).admission.findFirst({
-        where: { patientId: patient.id, tenantId: targetTenantId },
+        where: {
+          OR: [
+            { patientId: patient.id },
+            ...(lead.canonicalEnquiry?.id ? [{ enquiryId: lead.canonicalEnquiry.id }] : []),
+          ],
+          tenantId: targetTenantId,
+        },
       });
+
       if (!admission) {
         admission = await (this.prisma as any).admission.create({
           data: {
@@ -408,23 +546,40 @@ export class CrmErpConversionService {
             tenantId: targetTenantId,
             unitId: targetUnitId,
             status: 'ACTIVE',
-            admissionPriority: 'NORMAL',
-            healthCondition: 'STABLE',
-            clinicalStatus: 'AMBULATORY',
+            admissionPriority,
+            healthCondition,
+            clinicalStatus,
             floor: 'Floor 1',
             room: 'Assisted Care Suite',
             bed: 'Bed 1',
             admittedAt: new Date(),
           },
         });
+        domainResults.recordsCreated.push({ type: 'Admission', id: admission.id, patient: patient.name });
         this.logger.log(`[DEPT-PROVISION] Created Inpatient Admission for ${leadName} (Elder ID: ${patient.elderId})`);
+      } else {
+        admission = await (this.prisma as any).admission.update({
+          where: { id: admission.id },
+          data: {
+            patientId: patient.id,
+            healthCondition,
+            clinicalStatus,
+            admissionPriority,
+            status: 'ACTIVE',
+            unitId: targetUnitId || admission.unitId,
+            updatedAt: new Date(),
+          },
+        });
+        domainResults.recordsUpdated.push({ type: 'Admission', id: admission.id, patient: patient.name });
+        this.logger.log(`[DEPT-PROVISION] Updated Inpatient Admission for ${leadName} (Elder ID: ${patient.elderId})`);
       }
     }
 
     // 6. COMPLAINTS & FEEDBACK
     else if (category === 'COMPLAINT_OR_SUPPORT' || service.includes('complaint') || service.includes('support')) {
+      domainResults.domain = 'CUSTOMER_CARE_COMPLAINTS';
       const refNo = `CMP-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
-      await (this.prisma as any).complaint.create({
+      const complaint = await (this.prisma as any).complaint.create({
         data: {
           refNo,
           title: `CRM Support Intake: ${leadName}`,
@@ -436,7 +591,10 @@ export class CrmErpConversionService {
           unitId: targetUnitId,
         },
       });
+      domainResults.recordsCreated.push({ type: 'Complaint', id: complaint.id, ref: complaint.refNo });
       this.logger.log(`[DEPT-PROVISION] Created ERP Complaint ${refNo} for ${leadName}`);
     }
+
+    return domainResults;
   }
 }
