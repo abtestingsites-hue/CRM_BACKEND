@@ -119,18 +119,15 @@ export class VobizController {
   }
 
   private getBaseUrl(req: Request) {
-    const forwardedHost = req.headers['x-forwarded-host'];
-    const host = Array.isArray(forwardedHost) ? forwardedHost[0] : (forwardedHost || req.get('host'));
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
-    if (forwardedHost && host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
-      return `${protocol}://${host}`;
-    }
-    if (process.env.BASE_URL && process.env.BASE_URL.startsWith('http')) {
+    if (process.env.BASE_URL && process.env.BASE_URL.startsWith('http') && !process.env.BASE_URL.includes('localhost')) {
       return process.env.BASE_URL.replace(/\/$/, '');
     }
+    const forwardedHost = req.headers['x-forwarded-host'];
+    const host = Array.isArray(forwardedHost) ? forwardedHost[0] : (forwardedHost || req.headers.host || req.get('host'));
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
     if (host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
       return `${protocol}://${host}`;
     }
-    return 'https://crm-uec-backend.onrender.com';
+    return 'https://crm-backend-0py9.onrender.com';
   }
 }
